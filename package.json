@@ -1,0 +1,21 @@
+{
+  "name": "intersection-studio",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "可配置、可导出的程序化三维路口设计工具",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "vite": "^7.1.2",
+    "vitest": "^3.2.4"
+  }
+}

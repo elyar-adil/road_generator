@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0a0f18">
+  <meta name="description" content="在浏览器中设计、预览并导出程序化多岔路口。">
+  <title>路口工坊 · Intersection Studio</title>
+  <link rel="stylesheet" href="/src/styles.css">
+</head>
+<body>
+  <div id="app">
+    <div id="canvas-container" aria-label="三维路口预览"></div>
+    <div class="canvas-vignette" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <i></i><i></i><i></i>
+        </span>
+        <div>
+          <strong>路口工坊</strong>
+          <span>INTERSECTION STUDIO</span>
+        </div>
+      </div>
+
+      <label class="project-name">
+        <span>项目</span>
+        <input id="projectName" value="未命名路口" maxlength="40" aria-label="项目名称">
+      </label>
+
+      <div class="save-state" id="saveState" role="status">
+        <span class="save-dot"></span>
+        <span>已自动保存</span>
+      </div>
+
+      <nav class="toolbar" aria-label="项目工具">
+        <button id="undoBtn" class="icon-button" title="撤销 (Ctrl+Z)" aria-label="撤销">↶</button>
+        <button id="redoBtn" class="icon-button" title="重做 (Ctrl+Y)" aria-label="重做">↷</button>
+        <span class="toolbar-divider"></span>
+        <button id="importBtn">导入</button>
+        <button id="exportJsonBtn">保存项目</button>
+        <button id="exportGlbBtn">导出 GLB</button>
+        <button id="shotBtn" class="primary">导出图片</button>
+        <button id="helpBtn" class="icon-button" title="操作帮助" aria-label="操作帮助">?</button>
+      </nav>
+
+      <button id="panelToggle" class="panel-toggle" aria-label="打开参数面板" aria-expanded="false">☰</button>
+    </header>
+
+    <aside id="panel" aria-label="路口参数">
+      <div class="panel-heading">
+        <div>
+          <span class="eyebrow">PROCEDURAL DESIGN</span>
+          <h1>路口参数</h1>
+        </div>
+        <button id="panelClose" class="icon-button panel-close" aria-label="关闭参数面板">×</button>
+      </div>
+      <p class="sub">配置道路拓扑与设施，场景将实时重建。所有尺寸单位均为米。</p>
+
+      <section class="section first-section">
+        <div class="section-head">
+          <div class="section-title">快速预设</div>
+          <button id="randBtn" class="text-button">随机生成 ↗</button>
+        </div>
+        <div class="presets">
+          <button data-preset="cross4"><span>＋</span>标准十字</button>
+          <button data-preset="t3"><span>⊥</span>丁字路口</button>
+          <button data-preset="y3"><span>Y</span>三岔路口</button>
+          <button data-preset="offset4"><span>⌁</span>错位十字</button>
+          <button data-preset="five"><span>✣</span>五岔路口</button>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <div class="section-title">道路分支 <span id="armCountBadge" class="badge">4</span></div>
+          <button id="addArm" class="text-button">＋ 添加</button>
+        </div>
+        <div id="armsList"></div>
+      </section>
+
+      <section class="section">
+        <div class="section-title">几何参数</div>
+        <div class="control-stack">
+          <label class="slider-row" for="laneWidth">
+            <span>车道宽度</span>
+            <input type="range" id="laneWidth" min="2.6" max="4.2" step="0.05" value="3.25">
+            <output class="valtag" id="laneWidthV"></output><em>m</em>
+          </label>
+          <label class="slider-row" for="armLength">
+            <span>道路长度</span>
+            <input type="range" id="armLength" min="25" max="80" step="1" value="46">
+            <output class="valtag" id="armLengthV"></output><em>m</em>
+          </label>
+          <label class="slider-row" for="sidewalkWidth">
+            <span>人行道宽</span>
+            <input type="range" id="sidewalkWidth" min="0.8" max="5" step="0.1" value="2.4">
+            <output class="valtag" id="sidewalkWidthV"></output><em>m</em>
+          </label>
+          <label class="slider-row" for="filletSeg">
+            <span>转角精度</span>
+            <input type="range" id="filletSeg" min="1" max="12" step="1" value="7">
+            <output class="valtag" id="filletSegV"></output><em>级</em>
+          </label>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-title">场景图层</div>
+        <div class="toggles">
+          <label><input type="checkbox" id="showArrows" checked><span>车道箭头</span></label>
+          <label><input type="checkbox" id="showCrosswalk" checked><span>人行横道</span></label>
+          <label><input type="checkbox" id="showLights" checked><span>交通信号</span></label>
+          <label><input type="checkbox" id="showSidewalk" checked><span>人行道</span></label>
+          <label><input type="checkbox" id="showBuildings" checked><span>建筑与树木</span></label>
+          <label><input type="checkbox" id="showGrid"><span>尺寸网格</span></label>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-title">场景与交通</div>
+        <div class="field-row">
+          <label for="scenerySeed">场景种子</label>
+          <div class="inline-field">
+            <input id="scenerySeed" type="number" min="1" max="99999999" step="1">
+            <button id="seedBtn" class="icon-button" title="随机种子" aria-label="随机场景种子">⟳</button>
+          </div>
+        </div>
+        <label class="slider-row compact" for="trafficSpeed">
+          <span>信号速度</span>
+          <input type="range" id="trafficSpeed" min="0.25" max="3" step="0.25" value="1">
+          <output class="valtag" id="trafficSpeedV">1</output><em>×</em>
+        </label>
+        <button id="trafficPauseBtn" class="wide">暂停信号灯</button>
+      </section>
+
+      <section class="section panel-actions">
+        <button class="wide primary" id="genBtn">重新生成场景</button>
+        <button class="wide" id="resetProjectBtn">恢复默认项目</button>
+      </section>
+    </aside>
+
+    <div class="view-switch" aria-label="视角模式">
+      <div id="camtoggle">
+        <button id="cam3d" class="active">立体视图</button>
+        <button id="camtop">规划俯视</button>
+      </div>
+      <button id="resetCameraBtn" class="icon-button" title="重置视角" aria-label="重置视角">⌂</button>
+    </div>
+
+    <aside class="metrics" aria-label="项目统计">
+      <span class="eyebrow">LIVE METRICS</span>
+      <div class="metric-grid">
+        <div><strong id="statArms">4</strong><span>道路分支</span></div>
+        <div><strong id="statLanes">17</strong><span>总车道</span></div>
+        <div><strong id="statArea">—</strong><span>道路面积</span></div>
+      </div>
+      <div id="validationStatus" class="validation ok"><span></span>拓扑检查通过</div>
+    </aside>
+
+    <div id="hint"><b>拖拽</b> 旋转 · <b>滚轮</b> 缩放 · <b>右键</b> 平移</div>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <input id="fileInput" type="file" accept=".json,application/json" hidden>
+
+    <dialog id="helpDialog">
+      <form method="dialog">
+        <button class="dialog-close icon-button" aria-label="关闭">×</button>
+        <span class="eyebrow">QUICK GUIDE</span>
+        <h2>三分钟上手</h2>
+        <div class="help-grid">
+          <div><kbd>拖拽</kbd><p>在立体视图中旋转相机，右键拖拽平移。</p></div>
+          <div><kbd>滚轮</kbd><p>缩放场景；俯视模式会保持正交比例。</p></div>
+          <div><kbd>Ctrl Z</kbd><p>撤销最近一次参数或拓扑修改。</p></div>
+          <div><kbd>Ctrl S</kbd><p>将完整项目配置保存为 JSON。</p></div>
+        </div>
+        <p class="dialog-note">项目会自动保存在当前浏览器中。GLB 可用于 Blender 等三维软件，PNG 会按当前视角导出。</p>
+        <button class="primary wide" value="close">开始设计</button>
+      </form>
+    </dialog>
+
+    <dialog id="confirmDialog">
+      <form method="dialog">
+        <span class="eyebrow">RESET PROJECT</span>
+        <h2>恢复默认项目？</h2>
+        <p>当前参数会被默认十字路口替换，此操作可以撤销。</p>
+        <div class="dialog-actions">
+          <button value="cancel">取消</button>
+          <button id="confirmResetBtn" class="danger" value="confirm">确认恢复</button>
+        </div>
+      </form>
+    </dialog>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
