@@ -88,6 +88,11 @@
             <input type="range" id="laneWidth" min="2.6" max="4.2" step="0.05" value="3.25">
             <output class="valtag" id="laneWidthV"></output><em>m</em>
           </label>
+          <label class="slider-row" for="intersectionSize">
+            <span>路口核心尺寸</span>
+            <input type="range" id="intersectionSize" min="28" max="60" step="1" value="42">
+            <output class="valtag" id="intersectionSizeV"></output><em>m</em>
+          </label>
           <label class="slider-row" for="armLength">
             <span>道路长度</span>
             <input type="range" id="armLength" min="25" max="80" step="1" value="46">
@@ -111,6 +116,7 @@
         <div class="toggles">
           <label><input type="checkbox" id="showArrows" checked><span>车道箭头</span></label>
           <label><input type="checkbox" id="showCrosswalk" checked><span>人行横道</span></label>
+          <label><input type="checkbox" id="showWaitingAreas" checked><span title="GB 5768.3 信号交叉口待行区标线">左转/直行待行区</span></label>
           <label><input type="checkbox" id="showLights" checked><span>交通信号</span></label>
           <label><input type="checkbox" id="showSidewalk" checked><span>人行道</span></label>
           <label><input type="checkbox" id="showBuildings" checked><span>建筑与树木</span></label>

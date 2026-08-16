@@ -1,19 +1,36 @@
+import { classifyArmMovement } from './road-movements.js';
+
 export const PROJECT_FORMAT = 'intersection-studio';
 export const PROJECT_VERSION = 1;
 
 const CENTER_MODES = new Set(['planted', 'doubleYellowRail', 'doubleYellow']);
+const WAITING_AREA_TYPES = new Set(['none', 'left', 'straight']);
 
 const DEFAULT_ARMS = [
-  { angle: 0, laneIn: 2, laneOut: 2, centerMode: 'planted', medianWidth: 1.2, leftGuardrail: false, rightGuardrail: false },
-  { angle: 90, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, leftGuardrail: false, rightGuardrail: true },
-  { angle: 180, laneIn: 3, laneOut: 2, centerMode: 'doubleYellowRail', medianWidth: 1, leftGuardrail: false, rightGuardrail: false },
-  { angle: 270, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, leftGuardrail: true, rightGuardrail: false },
+  { angle: 0, laneIn: 2, laneOut: 2, centerMode: 'planted', medianWidth: 1.2, waitingArea: 'none', leftTurnLanes: 1, leftGuardrail: false, rightGuardrail: false },
+  { angle: 90, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, leftGuardrail: false, rightGuardrail: true },
+  { angle: 180, laneIn: 3, laneOut: 2, centerMode: 'doubleYellowRail', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, leftGuardrail: false, rightGuardrail: false },
+  { angle: 270, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, leftGuardrail: true, rightGuardrail: false },
 ];
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const boolean = (value, fallback) => typeof value === 'boolean' ? value : fallback;
+
+// CJJ 37 / CJJ 152 place urban intersection lanes mostly in the 3.0–3.5 m
+// range. For a three-lane approach plus the opposing carriageway, median and
+// pedestrian clearances, a 34–52 m core is a practical urban distribution;
+// 42 m is used as its most likely value rather than a uniform random midpoint.
+export function sampleIntersectionSize(random = Math.random) {
+  const min = 34, mode = 42, max = 52;
+  const unit = clamp(finite(random(), 0.5), 0, 1);
+  const split = (mode - min) / (max - min);
+  const value = unit < split
+    ? min + Math.sqrt(unit * (max - min) * (mode - min))
+    : max - Math.sqrt((1 - unit) * (max - min) * (max - mode));
+  return Math.round(value);
+}
 
 export function normalizeAngle(value) {
   return ((Math.round(finite(value, 0)) % 360) + 360) % 360;
@@ -25,32 +42,38 @@ export function angleDistance(a, b) {
 
 export function sanitizeArm(arm = {}) {
   const centerMode = CENTER_MODES.has(arm.centerMode) ? arm.centerMode : 'doubleYellow';
+  const waitingArea = WAITING_AREA_TYPES.has(arm.waitingArea) ? arm.waitingArea : 'none';
   return {
     angle: normalizeAngle(arm.angle),
     laneIn: clamp(Math.round(finite(arm.laneIn, 2)), 0, 6),
     laneOut: clamp(Math.round(finite(arm.laneOut, 2)), 0, 6),
     centerMode,
     medianWidth: Math.round(clamp(finite(arm.medianWidth, 1), 0, 4) * 10) / 10,
+    waitingArea,
+    leftTurnLanes: clamp(Math.round(finite(arm.leftTurnLanes, 1)), 1, 2),
     leftGuardrail: Boolean(arm.leftGuardrail),
     rightGuardrail: Boolean(arm.rightGuardrail),
   };
 }
 
 export function createDefaultProject() {
+  const scenerySeed = 20260816;
   return {
     projectName: '城市十字路口',
     arms: clone(DEFAULT_ARMS),
     laneWidth: 3.25,
+    intersectionSize: sampleIntersectionSize(createSeededRandom(scenerySeed)),
     armLength: 46,
     sidewalkWidth: 2.4,
     filletSeg: 7,
     showArrows: true,
     showCrosswalk: true,
+    showWaitingAreas: true,
     showLights: true,
     showSidewalk: true,
     showBuildings: true,
     showGrid: false,
-    scenerySeed: 20260816,
+    scenerySeed,
     trafficSpeed: 1,
     trafficPaused: false,
   };
@@ -74,16 +97,21 @@ export function sanitizeProject(value) {
   const defaults = createDefaultProject();
   const rawArms = Array.isArray(source.arms) ? source.arms : defaults.arms;
   const arms = rawArms.slice(0, 8).map(sanitizeArm);
+  const sampledFallback = sampleIntersectionSize(createSeededRandom(finite(source.scenerySeed, defaults.scenerySeed)));
+  const intersectionSize = Math.round(clamp(finite(source.intersectionSize, sampledFallback), 28, 60));
+  const requestedArmLength = Math.round(clamp(finite(source.armLength, defaults.armLength), 25, 80));
 
   return {
     projectName: String(source.projectName ?? defaults.projectName).trim().slice(0, 40) || '未命名路口',
     arms: arms.length >= 2 ? arms : defaults.arms,
     laneWidth: Math.round(clamp(finite(source.laneWidth, defaults.laneWidth), 2.6, 4.2) * 20) / 20,
-    armLength: Math.round(clamp(finite(source.armLength, defaults.armLength), 25, 80)),
+    intersectionSize,
+    armLength: Math.max(requestedArmLength, Math.ceil(intersectionSize/2+8)),
     sidewalkWidth: Math.round(clamp(finite(source.sidewalkWidth, defaults.sidewalkWidth), 0.8, 5) * 10) / 10,
     filletSeg: Math.round(clamp(finite(source.filletSeg, defaults.filletSeg), 1, 12)),
     showArrows: boolean(source.showArrows, defaults.showArrows),
     showCrosswalk: boolean(source.showCrosswalk, defaults.showCrosswalk),
+    showWaitingAreas: boolean(source.showWaitingAreas, defaults.showWaitingAreas),
     showLights: boolean(source.showLights, defaults.showLights),
     showSidewalk: boolean(source.showSidewalk, defaults.showSidewalk),
     showBuildings: boolean(source.showBuildings, defaults.showBuildings),
@@ -107,6 +135,34 @@ export function validateProject(value) {
     if (arm.laneIn + arm.laneOut === 0) {
       errors.push(`分支 ${index + 1} 至少需要一条车道`);
     }
+    if (arm.waitingArea !== 'none' && !project.showLights) {
+      warnings.push(`分支 ${index + 1} 的待转区需要交通信号控制`);
+    }
+    if (arm.waitingArea === 'left') {
+      const requiredLanes = arm.leftTurnLanes + 2;
+      if (arm.laneIn < requiredLanes) {
+        warnings.push(`分支 ${index + 1} 设置 ${arm.leftTurnLanes} 条左转专用道至少需要 ${requiredLanes} 条进入车道`);
+      }
+      const leftTargets = project.arms.map((target, targetIndex) => {
+        if (targetIndex === index || target.laneOut <= 0) return false;
+        const movement=classifyArmMovement(arm,target);
+        return movement.type==='left'?{target,turn:movement.turn}:null;
+      }).filter(Boolean).sort((a,b)=>Math.abs(a.turn-90)-Math.abs(b.turn-90));
+      if (!leftTargets.length) warnings.push(`分支 ${index + 1} 没有可连接的左侧出口`);
+      else if (leftTargets[0].target.laneOut < arm.leftTurnLanes) {
+        warnings.push(`分支 ${index + 1} 的左侧出口车道不足以连接 ${arm.leftTurnLanes} 条左转专用道`);
+      }
+    }
+    if (arm.waitingArea === 'straight' && arm.laneIn < 3) {
+      warnings.push(`分支 ${index + 1} 没有独立的直行车道可设置直行待行区`);
+    }
+    if (arm.waitingArea === 'straight') {
+      const hasStraightTarget = project.arms.some((target, targetIndex) => {
+        if (targetIndex === index || target.laneOut <= 0) return false;
+        return classifyArmMovement(arm,target).type==='straight';
+      });
+      if (!hasStraightTarget) warnings.push(`分支 ${index + 1} 没有可连接的直行出口`);
+    }
     for (let next = index + 1; next < project.arms.length; next += 1) {
       const gap = angleDistance(arm.angle, project.arms[next].angle);
       if (gap < 10) errors.push(`分支 ${index + 1} 与分支 ${next + 1} 的夹角小于 10°`);
@@ -116,6 +172,15 @@ export function validateProject(value) {
 
   if (!project.showLights && project.arms.length > 4) {
     warnings.push('复杂多岔路口建议启用交通信号');
+  }
+
+  const widestRoad = Math.max(...project.arms.map((arm) => {
+    const median = arm.laneIn > 0 && arm.laneOut > 0 && arm.centerMode === 'planted' ? arm.medianWidth : 0;
+    return (arm.laneIn + arm.laneOut) * project.laneWidth + median;
+  }));
+  const recommendedMinimum = Math.ceil(widestRoad + 8);
+  if (project.intersectionSize < recommendedMinimum) {
+    warnings.push(`当前车道规模建议路口核心尺寸不小于 ${recommendedMinimum} m`);
   }
 
   return { valid: errors.length === 0, errors, warnings, project };

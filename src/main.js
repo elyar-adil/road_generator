@@ -6,6 +6,7 @@ import {
   createSeededRandom,
   getProjectStats,
   parseProjectDocument,
+  sampleIntersectionSize,
   sanitizeProject,
   slugifyProjectName,
   validateProject,
@@ -16,6 +17,16 @@ import {
   ProjectHistory,
   saveLocalProject,
 } from './project-store.js';
+import {
+  buildDashedSegments,
+  buildLeftTurnPath,
+  offsetPolyline,
+  pointAndTangentAtDistance,
+  polylineLength,
+  trimPolyline,
+  trimBeforeLaneEnvelope,
+} from './waiting-area.js';
+import { classifyMovement,laneMovementSets } from './road-movements.js';
 
 /* ======================================================================
    程序化路口生成器
@@ -318,7 +329,8 @@ function computeArmGeom(arm){
   const inOuterS = medW/2 + arm.laneOut*laneW;
   const outOuterS = -(medW/2 + arm.laneIn*laneW);
   const totalHalf = Math.max(inOuterS, -outOuterS, (inOuterS-outOuterS)/2);
-  const R = 3.6 + (inOuterS - outOuterS)/2;
+  const laneBasedRadius = 3.6 + (inOuterS - outOuterS)/2;
+  const R = Math.max(laneBasedRadius,state.intersectionSize/2);
   function wp(u,s){ return add(scl(fwd,u), scl(left,s)); }
   return {arm, fwd, left, laneW, medW, inOuterS, outOuterS, totalHalf, R, wp,
     nearLeft: wp(R, inOuterS), nearRight: wp(R, outOuterS),
@@ -365,38 +377,6 @@ function updateCornerTrims(geoms){
     g.R=Math.max(g.leftR,g.rightR);
     g.nearMedL=g.wp(g.R,g.medW/2);
     g.nearMedR=g.wp(g.R,-g.medW/2);
-  });
-}
-
-function classifyMovement(fromG, toG){
-  const approachDir = scl(fromG.fwd, -1); // travel direction entering intersection
-  const exitDir = toG.fwd; // desired travel direction leaving via target arm
-  const cross = approachDir.x*exitDir.y - approachDir.y*exitDir.x;
-  const dot = approachDir.x*exitDir.x + approachDir.y*exitDir.y;
-  let turn = Math.atan2(cross,dot)*180/Math.PI; // + = CCW = left
-  if(turn>-45 && turn<45) return {type:'straight', turn};
-  if(turn>=45 && turn<150) return {type:'left', turn};
-  if(turn<=-45 && turn>-150) return {type:'right', turn};
-  return {type:'uturn', turn};
-}
-
-function laneMovementSets(L, available){
-  // available: Set of movement types actually reachable from this arm
-  const order = ['straight','right','left'];
-  const fallback = order.find(t=>available.has(t)) || 'straight';
-  if(L<=0) return [];
-  if(L===1) return [new Set(available.size? [...available]: [fallback])];
-  const arr = new Array(L).fill(0).map(()=> new Set());
-  // Inbound lanes are indexed from the centerline outward. Facing the
-  // intersection, the outermost lane is left and the innermost is right.
-  arr[0].add('right');
-  arr[L-1].add('left');
-  if(available.has('straight')){
-    for(let i=0;i<L;i++) arr[i].add('straight');
-  }
-  return arr.map(set=>{
-    const filtered = new Set([...set].filter(t=>available.has(t)));
-    return filtered.size? filtered : new Set([fallback]);
   });
 }
 
@@ -452,17 +432,18 @@ const RoadArrowShapes = (function(){
   const STRAIGHT = [
     [-75,0],[75,0],[75,1800],[225,1800],[0,3000],[-225,1800],[-75,1800]
   ];
-  // Left turn: shaft 150 wide, arrowhead pointing left with tip at x=-600.
+  // Left turn: shaft 150 wide; positive local lateral points to the visible
+  // left side of an inbound lane on the X/Z ground plane.
   const LEFT = [
     [225,0],[375,0],[375,1950],[-175,2550],[-175,3050],
     [-375,2250],[-175,1350],[-175,1800],[225,1350]
-  ];
-  // Combined straight + left in a single outline (left head hangs below
-  // the straight shaft, straight head on top).
+  ].map(([x,y])=>[-x,y]);
+  // Combined straight + left in a single outline (left head hangs below the
+  // straight shaft, straight head on top).
   const STRAIGHT_LEFT = [
     [150,0],[300,0],[300,1800],[450,1800],[225,3000],[0,1800],[150,1800],
     [150,800],[-250,1250],[-250,1750],[-450,950],[-250,200],[-250,650],[150,200]
-  ];
+  ].map(([x,y])=>[-x,y]);
   const RIGHT = LEFT.map(([x,y])=>[-x,y]);
   const STRAIGHT_RIGHT = STRAIGHT_LEFT.map(([x,y])=>[-x,y]);
   // Combined straight + left + right in a single outline (both turn heads
@@ -508,6 +489,210 @@ function buildArrowMesh(g, uTail, uTip, sBase, types){
     if(mesh) group.add(mesh);
   });
   return group;
+}
+
+// Waiting-area markings follow the convention in GB 5768.3 for signalized
+// intersections: the area is kept within the inbound lane envelope and is
+// outlined with a 15 cm white broken line. The existing solid stop line is
+// upstream of the crossing; a solid stop line closes the inner end.
+const WAITING_LINE_WIDTH = 0.15;
+const WAITING_STOP_LINE_WIDTH = 0.5;
+const WAITING_DASH = 1.0;
+const WAITING_GAP = 1.0;
+const WAITING_SURFACE = 0x343941;
+
+function addDashedPath(path){
+  buildDashedSegments(path,WAITING_DASH,WAITING_GAP).forEach(([p0,p1])=>{
+    const segment = boxAlong(p0,p1,{
+      lateral:0, width:WAITING_LINE_WIDTH, height:0.008, yBottom:0.09,
+      color:COLORS.white, rough:0.6, extend:0,
+    });
+    if(segment) worldGroup.add(segment);
+  });
+}
+
+function buildArrowMeshOnPath(path,types){
+  const group=new THREE.Group();
+  const total=polylineLength(path);
+  const arrowLength=Math.min(3,total*0.48);
+  if(arrowLength<1.5) return group;
+  const tailDistance=Math.min(0.7,total*0.12);
+  const pose=pointAndTangentAtDistance(path,tailDistance);
+  if(!pose) return group;
+  const normal=v2(pose.tangent.y,-pose.tangent.x);
+  const scale=arrowLength/RoadArrowShapes.length;
+  RoadArrowShapes.getPolygons(types).forEach(points=>{
+    const worldPoints=points.map(([lateral,forward])=>add(
+      pose.point,
+      add(scl(normal,lateral*scale),scl(pose.tangent,forward*scale)),
+    ));
+    const mesh=buildFlatPoly(worldPoints,[],0.092,COLORS.white,{rough:0.75});
+    if(mesh) group.add(mesh);
+  });
+  return group;
+}
+
+function addWaitingStopLine(p0,p1){
+  const line=boxAlong(p0,p1,{
+    lateral:0,width:WAITING_STOP_LINE_WIDTH,height:0.01,yBottom:0.09,
+    color:COLORS.white,rough:0.6,extend:0,
+  });
+  if(line) worldGroup.add(line);
+}
+
+function addPathWaitingArea(path,width,movement,{drawSideLines=true}={}){
+  if(path.length<3 || polylineLength(path)<2.2 || width<1.5) return;
+  const {left,right}=offsetPolyline(path,width/2);
+  const surface=buildFlatPoly(left.concat(right.slice().reverse()),[],0.013,WAITING_SURFACE,{rough:1});
+  if(surface) worldGroup.add(surface);
+  if(drawSideLines){
+    addDashedPath(left);
+    addDashedPath(right);
+  }
+  addWaitingStopLine(left.at(-1),right.at(-1));
+  if(movement) worldGroup.add(buildArrowMeshOnPath(path,[movement]));
+  return {left,right};
+}
+
+function averagePathGap(pathA,pathB){
+  const count=Math.min(pathA.length,pathB.length);
+  let total=0;
+  for(let i=0;i<count;i++) total+=len(sub(pathA[i],pathB[i]));
+  return count ? total/count : Infinity;
+}
+
+function averagePaths(pathA,pathB){
+  const count=Math.min(pathA.length,pathB.length);
+  return Array.from({length:count},(_,index)=>lerp2(pathA[index],pathB[index],0.5));
+}
+
+function findMovementTarget(fromG,geoms,type){
+  const expectedTurn=type==='left'?90:0;
+  return geoms
+    .filter(g=>g!==fromG&&g.arm.laneOut>0)
+    .map(g=>({g,movement:classifyMovement(fromG,g)}))
+    .filter(candidate=>candidate.movement.type===type)
+    .sort((a,b)=>Math.abs(a.movement.turn-expectedTurn)-Math.abs(b.movement.turn-expectedTurn))[0]?.g||null;
+}
+
+function leftTurnLaneCapacity(arm,target){
+  if(!target || arm.laneIn<3) return 0;
+  return Math.min(2,arm.leftTurnLanes,arm.laneIn-2,target.arm.laneOut);
+}
+
+function opposingLeftLaneCapacity(opposingG,target){
+  const arm=opposingG?.arm;
+  if(!arm) return 0;
+  if(!target || arm.laneIn<2 || target.arm.laneOut<1) return 0;
+  // A configured double-left approach reserves both median-side lanes.  On
+  // an ordinary two/three-lane approach, keep the innermost left-turn side
+  // clear as well; the adjacent straight carriageway remains the boundary.
+  return arm.waitingArea==='left'
+    ? Math.min(2,arm.leftTurnLanes,Math.max(0,arm.laneIn-2),target.arm.laneOut)
+    : Math.min(1,arm.laneIn-1);
+}
+
+function trimBeforeOpposingStraight(path,opposingG,halfWidth,opposingLeftLanes=0){
+  if(!opposingG) return path;
+  // Inbound lanes are indexed from the median outward.  When the opposing
+  // approach has one or two dedicated left-turn lanes, those lanes occupy the
+  // median side and may be crossed by our waiting pocket.  Only the remaining
+  // straight-through carriageway is a hard boundary.
+  const straightOuterEdge=-(opposingG.medW/2+opposingLeftLanes*opposingG.laneW);
+  return trimBeforeLaneEnvelope(path,{
+    forward:opposingG.fwd,
+    left:opposingG.left,
+    minLongitudinal:-opposingG.R-1,
+    maxLongitudinal:opposingG.R+1,
+    minLateral:opposingG.outOuterS,
+    maxLateral:straightOuterEdge,
+    halfWidth,
+  });
+}
+
+function addStraightWaitingArea(g,zoneOuter,firstLane,lastLane){
+  if(firstLane>lastLane) return;
+  const zoneDepth=Math.min(8,Math.max(4,state.laneWidth*2.2));
+  const zoneInner=Math.max(0.5,zoneOuter-zoneDepth);
+  const sInner=-(g.medW/2+firstLane*g.laneW);
+  const sOuter=-(g.medW/2+(lastLane+1)*g.laneW);
+  const path=[g.wp(zoneOuter,(sInner+sOuter)/2),g.wp(zoneInner,(sInner+sOuter)/2)];
+  // Add a midpoint so the common path renderer can also handle this straight
+  // variant without a special surface or dash implementation.
+  path.splice(1,0,lerp2(path[0],path[1],0.5));
+  addPathWaitingArea(path,Math.abs(sInner-sOuter),null);
+  for(let lane=firstLane+1;lane<=lastLane;lane++){
+    const divider=-(g.medW/2+lane*g.laneW);
+    addDashedPath([
+      g.wp(zoneOuter,divider),
+      g.wp((zoneOuter+zoneInner)/2,divider),
+      g.wp(zoneInner,divider),
+    ]);
+  }
+  for(let lane=firstLane;lane<=lastLane;lane++){
+    const center=-(g.medW/2+(lane+0.5)*g.laneW);
+    const lanePath=[g.wp(zoneOuter,center),g.wp((zoneOuter+zoneInner)/2,center),g.wp(zoneInner,center)];
+    worldGroup.add(buildArrowMeshOnPath(lanePath,['straight']));
+  }
+}
+
+function addLeftWaitingAreas(fromG,targetG,opposingG,zoneOuter,laneCount,opposingLeftLanes=0){
+  const random=createSeededRandom((state.scenerySeed+Math.round(fromG.arm.angle)*2654435761+laneCount*1013904223)>>>0);
+  // A real left-turn waiting pocket normally reaches well into the junction.
+  // Scale it with the junction core, then bias the seeded variation toward the
+  // longer end so the marking does not look like a short lane stub.
+  const minLength=Math.min(12,Math.max(8,state.intersectionSize*0.22));
+  const maxLength=Math.min(28,Math.max(minLength+5,state.intersectionSize*0.46));
+  const desiredLength=minLength+(maxLength-minLength)*(0.72+random()*0.16);
+  // Keep the first half visibly bowed instead of using an over-large handle
+  // that leaves a long straight lead and a late, sharp bend.
+  const baseHandle=1.20+random()*0.16;
+  const paths=[];
+  for(let laneOffset=0;laneOffset<laneCount;laneOffset++){
+    const sourceLane=laneOffset;
+    const sourceS=-(fromG.medW/2+(sourceLane+0.5)*fromG.laneW);
+    const targetS=targetG.medW/2+(laneOffset+0.5)*targetG.laneW;
+    let bestPath=[];
+    let bestLength=0;
+    for(let attempt=0;attempt<5;attempt++){
+      const candidate=buildLeftTurnPath({
+        start:fromG.wp(zoneOuter,sourceS),
+        startDirection:scl(fromG.fwd,-1),
+        target:targetG.wp(targetG.R+0.55,targetS),
+        targetDirection:targetG.fwd,
+        samples:Math.max(18,state.filletSeg*4),
+        handleScale:baseHandle+attempt*0.10+laneOffset*0.02,
+        maxProgress:0.54+attempt*0.004,
+      });
+      const safe=trimBeforeOpposingStraight(candidate,opposingG,fromG.laneW/2,opposingLeftLanes);
+      const length=polylineLength(safe);
+      if(length>bestLength) { bestLength=length; bestPath=safe; }
+      if(length>=desiredLength) { bestPath=trimPolyline(safe,desiredLength); break; }
+    }
+    // The opposing through carriageway remains the hard limit. In a compact
+    // junction, retain the longest safe pocket once it is still useful rather
+    // than extending it into a through lane or hiding it entirely.
+    const minimumUsefulLength=Math.max(7,minLength*0.82);
+    paths.push(bestLength>=minimumUsefulLength ? trimPolyline(bestPath,maxLength) : []);
+  }
+  if(paths.length===1){
+    addPathWaitingArea(paths[0],fromG.laneW,'left');
+    return;
+  }
+
+  const strips=paths.map(path=>addPathWaitingArea(path,fromG.laneW,'left',{drawSideLines:false}));
+  if(strips.some(strip=>!strip)) return;
+  const first=averagePathGap(strips[0].left,strips[1].right);
+  const second=averagePathGap(strips[0].right,strips[1].left);
+  if(first<=second){
+    addDashedPath(strips[0].right);
+    addDashedPath(averagePaths(strips[0].left,strips[1].right));
+    addDashedPath(strips[1].left);
+  }else{
+    addDashedPath(strips[0].left);
+    addDashedPath(averagePaths(strips[0].right,strips[1].left));
+    addDashedPath(strips[1].right);
+  }
 }
 
 // traffic light head with 3 lamps (returns {group, lamps:[red,yellow,green materials]})
@@ -570,6 +755,8 @@ function regenerate(){
     }
     return set;
   });
+  const leftTargets=geoms.map(g=>findMovementTarget(g,geoms,'left'));
+  const straightTargets=geoms.map(g=>findMovementTarget(g,geoms,'straight'));
 
   // ---- arm road quads + median + markings + arrows + crosswalk + stop line
   geoms.forEach((g,i)=>{
@@ -579,6 +766,10 @@ function regenerate(){
     const crosswalkEnd=Math.min(g.R+4.2,state.armLength-1.8);
     const hasCrosswalkSpace=crosswalkEnd-crosswalkStart>1.2;
     const stopU=hasCrosswalkSpace ? crosswalkEnd+0.45 : g.R+0.45;
+    // Waiting-area markings begin after the pedestrian crossing, on the
+    // intersection side. They must not originate at the upstream stop line
+    // or run across the zebra crossing.
+    const waitingAreaStartU=hasCrosswalkSpace ? crosswalkStart-0.2 : stopU-0.22;
     const stopLineWidth=0.5;
     // Longitudinal lane markings must end before the stop line instead of
     // continuing through it and across the pedestrian crossing.
@@ -651,9 +842,36 @@ function regenerate(){
       }
     }
 
+    const leftTarget=leftTargets[i];
+    const dedicatedLeftLanes=arm.waitingArea==='left' ? leftTurnLaneCapacity(arm,leftTarget) : 0;
+    const movementSets=arm.laneIn>0
+      ? laneMovementSets(arm.laneIn,availPerArm[i],dedicatedLeftLanes)
+      : [];
+
+    // Waiting areas are explicit per approach. Right-turn movements never
+    // receive one; left-turn areas follow the target lane and stop at the
+    // intersection centre, while the rarer straight variant remains linear.
+    if(state.showWaitingAreas&&state.showLights&&arm.laneIn>0){
+      if(arm.waitingArea==='left'&&dedicatedLeftLanes>0){
+        const opposingIndex=straightTargets[i] ? geoms.indexOf(straightTargets[i]) : -1;
+        const opposingLeftLanes=opposingIndex>=0
+          ? opposingLeftLaneCapacity(geoms[opposingIndex],leftTargets[opposingIndex])
+          : 0;
+        addLeftWaitingAreas(g,leftTarget,straightTargets[i],waitingAreaStartU,dedicatedLeftLanes,opposingLeftLanes);
+      }else if(arm.waitingArea==='straight'){
+        const straightOnly=movementSets
+          .map((set,lane)=>({set,lane}))
+          .filter(({set})=>set.size===1&&set.has('straight'))
+          .map(({lane})=>lane);
+        if(straightOnly.length){
+          addStraightWaitingArea(g,waitingAreaStartU,straightOnly[0],straightOnly.at(-1));
+        }
+      }
+    }
+
     // arrows
     if(state.showArrows && arm.laneIn>0){
-      const sets = laneMovementSets(arm.laneIn, availPerArm[i]);
+      const sets = movementSets;
       const uTip=stopU+1.3;
       const uTail=Math.min(uTip+3.4,state.armLength-0.8);
       if(uTail-uTip>1.5){
@@ -883,6 +1101,7 @@ function formatSliderValue(value,digits){
 
 const sliderConfigs=[
   ['laneWidth','laneWidth',2,true],
+  ['intersectionSize','intersectionSize',0,true],
   ['armLength','armLength',0,true],
   ['sidewalkWidth','sidewalkWidth',2,true],
   ['filletSeg','filletSeg',0,true],
@@ -893,6 +1112,16 @@ function syncSlider(id,key,digits,shouldRegenerate){
   const tag=document.getElementById(id+'V');
   const update=()=>{
     state[key]=Number(el.value);
+    if(key==='intersectionSize'){
+      const requiredArmLength=Math.ceil(state.intersectionSize/2+8);
+      if(state.armLength<requiredArmLength){
+        state.armLength=requiredArmLength;
+        const armLengthInput=document.getElementById('armLength');
+        const armLengthValue=document.getElementById('armLengthV');
+        armLengthInput.value=state.armLength;
+        armLengthValue.textContent=formatSliderValue(state.armLength,0);
+      }
+    }
     tag.textContent=formatSliderValue(el.value,digits);
     if(shouldRegenerate) scheduleRegenerate();
   };
@@ -903,7 +1132,7 @@ function syncSlider(id,key,digits,shouldRegenerate){
 
 sliderConfigs.forEach(config=>syncSlider(...config));
 
-const layerIds=['showArrows','showCrosswalk','showLights','showSidewalk','showBuildings'];
+const layerIds=['showArrows','showCrosswalk','showWaitingAreas','showLights','showSidewalk','showBuildings'];
 layerIds.forEach(id=>{
   const el=document.getElementById(id);
   el.checked=Boolean(state[id]);
@@ -966,10 +1195,12 @@ function angleDistance(a,b){ return Math.abs(((a-b+540)%360)-180); }
 function normaliseArmValue(field,value){
   if(field==='angle') return ((Math.round(value)%360)+360)%360;
   if(field==='medianWidth') return Math.min(4,Math.max(0,Math.round(value*10)/10));
+  if(field==='leftTurnLanes') return Math.min(2,Math.max(1,Math.round(value)));
   return Math.min(6,Math.max(0,Math.round(value)));
 }
 
 const CENTER_MODES=new Set(['planted','doubleYellowRail','doubleYellow']);
+const WAITING_AREA_TYPES=new Set(['none','left','straight']);
 function randomCenterMode(){
   const value=Math.random();
   if(value<0.35) return 'planted';
@@ -982,6 +1213,8 @@ function makeArm(angle,laneIn=2,laneOut=2){
     angle,laneIn,laneOut,
     centerMode:randomCenterMode(),
     medianWidth:Math.round((0.8+Math.random()*1.4)*10)/10,
+    waitingArea:'none',
+    leftTurnLanes:1,
     leftGuardrail:Math.random()<0.25,
     rightGuardrail:Math.random()<0.25,
   };
@@ -989,7 +1222,9 @@ function makeArm(angle,laneIn=2,laneOut=2){
 
 function normaliseArm(arm){
   if(!CENTER_MODES.has(arm.centerMode)) arm.centerMode='doubleYellow';
+  if(!WAITING_AREA_TYPES.has(arm.waitingArea)) arm.waitingArea='none';
   arm.medianWidth=normaliseArmValue('medianWidth',Number.isFinite(+arm.medianWidth)?+arm.medianWidth:1);
+  arm.leftTurnLanes=normaliseArmValue('leftTurnLanes',Number.isFinite(+arm.leftTurnLanes)?+arm.leftTurnLanes:1);
   arm.leftGuardrail=Boolean(arm.leftGuardrail);
   arm.rightGuardrail=Boolean(arm.rightGuardrail);
   return arm;
@@ -1000,6 +1235,10 @@ function renderArmsList(){
   wrap.innerHTML='';
   state.arms.forEach((arm,idx)=>{
     normaliseArm(arm);
+    const requiredLeftLanes=arm.leftTurnLanes+2;
+    const waitingNote=arm.waitingArea==='left'&&arm.laneIn<requiredLeftLanes
+      ? `当前配置至少需要 ${requiredLeftLanes} 条进入车道`
+      : (arm.waitingArea==='straight'&&arm.laneIn<3 ? '至少需要一条独立直行车道' : '待转区仅在启用交通信号时显示');
     const row=document.createElement('div');
     row.className='arm-row';
     row.innerHTML=
@@ -1017,6 +1256,18 @@ function renderArmsList(){
         '</select></div>'+
         '<div class="median-width"'+(arm.centerMode==='planted'?'':' hidden')+'><label>绿化带宽 m</label><input type="number" min="0" max="4" step="0.1" value="'+arm.medianWidth+'" data-f="medianWidth"></div>'+
       '</div>'+
+      '<div class="facility waiting-facility">'+
+        '<div><label>待转区类型</label><select data-f="waitingArea">'+
+          '<option value="none"'+(arm.waitingArea==='none'?' selected':'')+'>无</option>'+
+          '<option value="left"'+(arm.waitingArea==='left'?' selected':'')+(arm.laneIn<3?' disabled':'')+'>左转待转区</option>'+
+          '<option value="straight"'+(arm.waitingArea==='straight'?' selected':'')+(arm.laneIn<3?' disabled':'')+'>直行待行区</option>'+
+        '</select></div>'+
+        '<div class="left-turn-lanes"'+(arm.waitingArea==='left'?'':' hidden')+'><label>左转专用道</label><select data-f="leftTurnLanes">'+
+          '<option value="1"'+(arm.leftTurnLanes===1?' selected':'')+'>1 条</option>'+
+          '<option value="2"'+(arm.leftTurnLanes===2?' selected':'')+(arm.laneIn<4?' disabled':'')+'>2 条</option>'+
+        '</select></div>'+
+      '</div>'+
+      '<p class="waiting-note">'+waitingNote+'</p>'+
       '<div class="rail-options">'+
         '<label><input type="checkbox" data-f="leftGuardrail"'+(arm.leftGuardrail?' checked':'')+'>面向路口左侧护栏</label>'+
         '<label><input type="checkbox" data-f="rightGuardrail"'+(arm.rightGuardrail?' checked':'')+'>面向路口右侧护栏</label>'+
@@ -1056,7 +1307,7 @@ function renderArmsList(){
         }
         arm[field]=next;
         input.value=next;
-        if((field==='laneIn' || field==='laneOut') && (arm.laneIn<=0 || arm.laneOut<=0)){
+        if(field==='laneIn' || field==='laneOut'){
           renderArmsList();
         }
         regenerate();
@@ -1067,6 +1318,18 @@ function renderArmsList(){
       if(arm.laneIn<=0 || arm.laneOut<=0) return;
       arm.centerMode=event.target.value;
       row.querySelector('.median-width').hidden=arm.centerMode!=='planted';
+      regenerate();
+    });
+
+    row.querySelector('[data-f=waitingArea]').addEventListener('change',event=>{
+      arm.waitingArea=WAITING_AREA_TYPES.has(event.target.value)?event.target.value:'none';
+      renderArmsList();
+      regenerate();
+    });
+
+    row.querySelector('[data-f=leftTurnLanes]').addEventListener('change',event=>{
+      arm.leftTurnLanes=normaliseArmValue('leftTurnLanes',Number(event.target.value));
+      renderArmsList();
       regenerate();
     });
 
@@ -1120,7 +1383,10 @@ document.getElementById('randBtn').addEventListener('click',()=>{
     1+Math.floor(Math.random()*3),
   ));
   state.scenerySeed=1+Math.floor(Math.random()*99999998);
+  state.intersectionSize=sampleIntersectionSize(Math.random);
   seedInput.value=state.scenerySeed;
+  document.getElementById('intersectionSize').value=state.intersectionSize;
+  document.getElementById('intersectionSizeV').textContent=state.intersectionSize;
   renderArmsList();
   regenerate();
 });
@@ -1136,6 +1402,9 @@ const presets={
 document.querySelectorAll('[data-preset]').forEach(button=>{
   button.addEventListener('click',()=>{
     state.arms=presets[button.dataset.preset].map(arm=>makeArm(arm.angle,arm.laneIn,arm.laneOut));
+    state.intersectionSize=sampleIntersectionSize(Math.random);
+    document.getElementById('intersectionSize').value=state.intersectionSize;
+    document.getElementById('intersectionSizeV').textContent=state.intersectionSize;
     renderArmsList();
     regenerate();
   });

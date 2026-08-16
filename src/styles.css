@@ -501,6 +501,17 @@ button.wide {
   margin-top: 8px;
 }
 
+.arm-row .waiting-facility {
+  grid-template-columns: 1fr 1fr;
+}
+
+.arm-row .waiting-note {
+  margin: 5px 1px 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
 .arm-row .rail-options {
   display: grid;
   grid-template-columns: 1fr 1fr;
