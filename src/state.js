@@ -1,16 +1,16 @@
 import { classifyArmMovement } from './road-movements.js';
 
 export const PROJECT_FORMAT = 'intersection-studio';
-export const PROJECT_VERSION = 1;
+export const PROJECT_VERSION = 2;
 
 const CENTER_MODES = new Set(['planted', 'doubleYellowRail', 'doubleYellow']);
 const WAITING_AREA_TYPES = new Set(['none', 'left', 'straight']);
 
 const DEFAULT_ARMS = [
-  { angle: 0, laneIn: 2, laneOut: 2, centerMode: 'planted', medianWidth: 1.2, waitingArea: 'none', leftTurnLanes: 1, leftGuardrail: false, rightGuardrail: false },
-  { angle: 90, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, leftGuardrail: false, rightGuardrail: true },
-  { angle: 180, laneIn: 3, laneOut: 2, centerMode: 'doubleYellowRail', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, leftGuardrail: false, rightGuardrail: false },
-  { angle: 270, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, leftGuardrail: true, rightGuardrail: false },
+  { angle: 0, laneIn: 2, laneOut: 2, centerMode: 'planted', medianWidth: 1.2, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, leftGuardrail: false, rightGuardrail: false },
+  { angle: 90, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, leftGuardrail: false, rightGuardrail: true },
+  { angle: 180, laneIn: 3, laneOut: 2, centerMode: 'doubleYellowRail', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, leftGuardrail: false, rightGuardrail: false },
+  { angle: 270, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, leftGuardrail: true, rightGuardrail: false },
 ];
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -51,6 +51,7 @@ export function sanitizeArm(arm = {}) {
     medianWidth: Math.round(clamp(finite(arm.medianWidth, 1), 0, 4) * 10) / 10,
     waitingArea,
     leftTurnLanes: clamp(Math.round(finite(arm.leftTurnLanes, 1)), 1, 2),
+    rightTurnLanes: clamp(Math.round(finite(arm.rightTurnLanes, 1)), 0, 2),
     leftGuardrail: Boolean(arm.leftGuardrail),
     rightGuardrail: Boolean(arm.rightGuardrail),
   };
@@ -95,9 +96,10 @@ function unwrapProject(value) {
 export function sanitizeProject(value) {
   const source = unwrapProject(value);
   const defaults = createDefaultProject();
+  const scenerySeed = finite(source.scenerySeed, defaults.scenerySeed);
   const rawArms = Array.isArray(source.arms) ? source.arms : defaults.arms;
   const arms = rawArms.slice(0, 8).map(sanitizeArm);
-  const sampledFallback = sampleIntersectionSize(createSeededRandom(finite(source.scenerySeed, defaults.scenerySeed)));
+  const sampledFallback = sampleIntersectionSize(createSeededRandom(scenerySeed));
   const intersectionSize = Math.round(clamp(finite(source.intersectionSize, sampledFallback), 28, 60));
   const requestedArmLength = Math.round(clamp(finite(source.armLength, defaults.armLength), 25, 80));
 
@@ -116,7 +118,7 @@ export function sanitizeProject(value) {
     showSidewalk: boolean(source.showSidewalk, defaults.showSidewalk),
     showBuildings: boolean(source.showBuildings, defaults.showBuildings),
     showGrid: boolean(source.showGrid, defaults.showGrid),
-    scenerySeed: Math.round(clamp(finite(source.scenerySeed, defaults.scenerySeed), 1, 99999999)),
+    scenerySeed: Math.round(clamp(scenerySeed, 1, 99999999)),
     trafficSpeed: Math.round(clamp(finite(source.trafficSpeed, defaults.trafficSpeed), 0.25, 3) * 4) / 4,
     trafficPaused: Boolean(source.trafficPaused),
   };
@@ -162,6 +164,22 @@ export function validateProject(value) {
         return classifyArmMovement(arm,target).type==='straight';
       });
       if (!hasStraightTarget) warnings.push(`分支 ${index + 1} 没有可连接的直行出口`);
+    }
+    if (arm.rightTurnLanes > 0) {
+      const rightTargets = project.arms.map((target, targetIndex) => {
+        if (targetIndex === index || target.laneOut <= 0) return false;
+        const movement=classifyArmMovement(arm,target);
+        return movement.type==='right'?{target,turn:movement.turn}:null;
+      }).filter(Boolean).sort((a,b)=>Math.abs(a.turn+90)-Math.abs(b.turn+90));
+      if (arm.laneIn < 1) {
+        warnings.push(`分支 ${index + 1} 没有进入车道，无法设置右转专用道`);
+      } else if (!rightTargets.length) {
+        warnings.push(`分支 ${index + 1} 没有可连接的右侧出口，右转专用道将不生成`);
+      } else if (arm.laneIn < arm.rightTurnLanes) {
+        warnings.push(`分支 ${index + 1} 的进入车道不足以设置 ${arm.rightTurnLanes} 条右转专用道`);
+      } else if (rightTargets[0].target.laneOut < arm.rightTurnLanes) {
+        warnings.push(`分支 ${index + 1} 的右侧出口车道不足以连接 ${arm.rightTurnLanes} 条右转专用道`);
+      }
     }
     for (let next = index + 1; next < project.arms.length; next += 1) {
       const gap = angleDistance(arm.angle, project.arms[next].angle);

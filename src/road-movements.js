@@ -21,21 +21,34 @@ export function classifyArmMovement(fromArm,toArm){
   );
 }
 
-export function laneMovementSets(laneCount,available,dedicatedLeftLanes=0){
+export function laneMovementSets(laneCount,available,dedicatedLeftLanes=0,dedicatedRightLanes=0){
   const order=['straight','right','left'];
-  const fallback=order.find(type=>available.has(type))||'straight';
+  const rightCount=Math.min(laneCount,Math.max(0,Math.round(dedicatedRightLanes)));
+  const fallback=order.find(type=>available.has(type))
+    || (available.has('right')?'right':'straight');
   if(laneCount<=0) return [];
-  if(laneCount===1) return [new Set(available.size?[...available]:[fallback])];
+  if(laneCount===1){
+    if(rightCount>0 && available.has('right')) return [new Set(['right'])];
+    return [new Set(available.size?[...available]:[fallback])];
+  }
 
   const lanes=new Array(laneCount).fill(0).map(()=>new Set());
-  lanes[laneCount-1].add('right');
+  if(available.has('right')){
+    for(let lane=laneCount-rightCount;lane<laneCount;lane++){
+      if(lane>=0) lanes[lane].add('right');
+    }
+    if(rightCount===0) lanes[laneCount-1].add('right');
+  }
   const leftCount=available.has('left')
-    ? Math.min(laneCount,Math.max(1,dedicatedLeftLanes))
+    ? Math.min(laneCount-rightCount,Math.max(1,dedicatedLeftLanes))
     : 0;
   for(let lane=0;lane<leftCount;lane++) lanes[lane].add('left');
   if(available.has('straight')){
     const straightStart=dedicatedLeftLanes>0?leftCount:0;
-    for(let lane=straightStart;lane<laneCount;lane++) lanes[lane].add('straight');
+    for(let lane=straightStart;lane<laneCount-rightCount;lane++) lanes[lane].add('straight');
+    if(rightCount===0){
+      for(let lane=straightStart;lane<laneCount;lane++) lanes[lane].add('straight');
+    }
   }
   return lanes.map(set=>{
     const filtered=new Set([...set].filter(type=>available.has(type)));

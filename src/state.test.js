@@ -17,6 +17,8 @@ describe('project state', () => {
     expect(result.valid).toBe(true);
     expect(result.project.arms).toHaveLength(4);
     expect(result.project.arms.every((arm) => arm.waitingArea === 'none')).toBe(true);
+    expect(result.project.arms.every((arm) => arm.rightTurnLane)).toBe(true);
+    expect(result.project.arms.every((arm) => ['planted', 'hatched'].includes(arm.rightTurnIsland))).toBe(true);
   });
 
   it('normalizes imported numeric values and flags overlapping arms', () => {
@@ -48,6 +50,34 @@ describe('project state', () => {
     expect(project.arms[1].leftTurnLanes).toBe(1);
   });
 
+  it('sanitizes right-turn lane and triangular-island settings', () => {
+    const project = sanitizeProject({
+      scenerySeed: 4,
+      arms: [
+        { angle: 0, laneIn: 2, laneOut: 2, rightTurnLane: true, rightTurnIsland: 'hatched' },
+        { angle: 180, laneIn: 2, laneOut: 2, rightTurnLane: false, rightTurnIsland: 'invalid' },
+      ],
+    });
+
+    expect(project.arms[0].rightTurnLane).toBe(true);
+    expect(project.arms[0].rightTurnIsland).toBe('hatched');
+    expect(project.arms[1].rightTurnLane).toBe(false);
+    expect(project.arms[1].rightTurnIsland).toBe('hatched');
+  });
+
+  it('warns when a right-turn lane has no reachable right-side exit', () => {
+    const project = sanitizeProject({
+      arms: [
+        { angle: 0, laneIn: 2, laneOut: 2, rightTurnLane: true },
+        { angle: 180, laneIn: 2, laneOut: 2, rightTurnLane: false },
+      ],
+    });
+    const result = validateProject(project);
+
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((warning) => warning.includes('没有可连接的右侧出口'))).toBe(true);
+  });
+
   it('warns when a configured waiting area has insufficient lanes', () => {
     const project = createDefaultProject();
     project.arms[0].waitingArea = 'left';
@@ -66,7 +96,7 @@ describe('project state', () => {
     const restored = parseProjectDocument(JSON.stringify(document));
 
     expect(restored).toEqual(source);
-    expect(document.version).toBe(1);
+    expect(document.version).toBe(2);
   });
 
   it('calculates stable metrics and deterministic random values', () => {

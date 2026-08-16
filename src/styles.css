@@ -505,8 +505,33 @@ button.wide {
   grid-template-columns: 1fr 1fr;
 }
 
+.arm-row .right-turn-facility {
+  grid-template-columns: 1fr 1fr;
+}
+
+.arm-row .right-turn-facility label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 31px;
+  cursor: pointer;
+}
+
+.arm-row .right-turn-facility input[type="checkbox"] {
+  width: auto;
+  height: auto;
+  accent-color: var(--accent);
+}
+
 .arm-row .waiting-note {
   margin: 5px 1px 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.arm-row .right-turn-note {
+  margin: 2px 1px 0;
   color: var(--muted);
   font-size: 9px;
   line-height: 1.4;

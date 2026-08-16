@@ -16,4 +16,17 @@ describe('road movement orientation',()=>{
     expect(lanes[3].has('right')).toBe(true);
     expect(lanes[3].has('left')).toBe(false);
   });
+
+  it('keeps the original outer lane straight when a right-turn branch splits off',()=>{
+    const lanes=laneMovementSets(3,new Set(['left','straight','right']),1,true);
+    expect([...lanes[0]]).toEqual(['left']);
+    expect([...lanes[1]]).toEqual(['straight']);
+    expect([...lanes[2]]).toEqual(['straight']);
+  });
+
+  it('falls back to the normal movement set when no right target exists',()=>{
+    const lanes=laneMovementSets(2,new Set(['straight']),0,true);
+    expect(lanes[0].has('straight')).toBe(true);
+    expect(lanes[1].has('straight')).toBe(true);
+  });
 });

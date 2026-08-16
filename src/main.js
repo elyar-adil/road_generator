@@ -26,7 +26,8 @@ import {
   trimPolyline,
   trimBeforeLaneEnvelope,
 } from './waiting-area.js';
-import { classifyMovement,laneMovementSets } from './road-movements.js';
+import { classifyArmMovement,classifyMovement,laneMovementSets } from './road-movements.js';
+import { computeRightTurnLayout } from './right-turn.js';
 
 /* ======================================================================
    程序化路口生成器
@@ -286,6 +287,141 @@ function buildMedianIsland(g,noseInnerU){
     if(curb) group.add(curb);
   }
   return group;
+}
+
+function cubicPoint2(p0,p1,p2,p3,t){
+  const mt=1-t;
+  return v2(
+    mt*mt*mt*p0.x+3*mt*mt*t*p1.x+3*mt*t*t*p2.x+t*t*t*p3.x,
+    mt*mt*mt*p0.y+3*mt*mt*t*p1.y+3*mt*t*t*p2.y+t*t*t*p3.y,
+  );
+}
+
+function appendCubic2(path,p0,p1,p2,p3,segments=8){
+  for(let i=1;i<=segments;i++) path.push(cubicPoint2(p0,p1,p2,p3,i/segments));
+}
+
+function rightTurnPathData(fromG,toG){
+  if(!fromG || !toG || fromG.arm.laneIn<1 || toG.arm.laneOut<1) return null;
+  const laneW=fromG.laneW;
+  const sourceOuterS=fromG.outOuterS;
+  const sourceBranchCenterS=sourceOuterS-laneW*0.5;
+  const targetOuterS=toG.inOuterS;
+  const {cornerU,splitU}=computeRightTurnLayout({
+    fromRadius:fromG.R,
+    targetRadius:toG.R,
+    armLength:state.armLength,
+    laneWidth:laneW,
+  });
+  // The fork nose starts on the existing outer road edge.  The branch then
+  // widens outward by one lane instead of stealing width from the through
+  // carriageway.
+  const sourceFar=fromG.wp(splitU,sourceOuterS);
+  const sourceNear=fromG.wp(cornerU,sourceBranchCenterS);
+  const targetNear=toG.wp(cornerU,targetOuterS+laneW*0.5);
+  const chord=len(sub(sourceNear,targetNear));
+  if(chord<2) return null;
+  const handle=Math.min(12,Math.max(3.5,chord*0.34));
+  const sourceToNear=len(sub(sourceFar,sourceNear));
+  const sourceHandle=Math.min(10,Math.max(3,sourceToNear*0.42));
+  const path=[sourceFar];
+  appendCubic2(path,
+    sourceFar, add(sourceFar,scl(fromG.fwd,-sourceHandle)),
+    add(sourceNear,scl(fromG.fwd,sourceHandle)), sourceNear, 8);
+  const islandStart=path.length-1;
+  appendCubic2(path,
+    sourceNear, add(sourceNear,scl(fromG.fwd,-handle)),
+    add(targetNear,scl(toG.fwd,-handle)), targetNear, 14);
+  const islandEnd=path.length-1;
+  return {
+    path,
+    sourceAnchor: sourceFar,
+    targetAnchor: targetNear,
+    islandStart,
+    islandEnd,
+  };
+}
+
+function variableOffsetPath(path,halfWidth,taperPoints=4){
+  const left=[],right=[];
+  for(let i=0;i<path.length;i++){
+    const previous=path[Math.max(0,i-1)], next=path[Math.min(path.length-1,i+1)];
+    const tangent=sub(next,previous), tangentLen=len(tangent)||1;
+    const normal=v2(-tangent.y/tangentLen,tangent.x/tangentLen);
+    const scaleFactor=Math.min(1,i/Math.max(1,taperPoints));
+    left.push(add(path[i],scl(normal,halfWidth*scaleFactor)));
+    right.push(add(path[i],scl(normal,-halfWidth*scaleFactor)));
+  }
+  return {left,right};
+}
+
+function addRightTurnCrossingAndYield(path,laneW){
+  const total=polylineLength(path);
+  if(total<8) return;
+  const crossingDistance=total*0.78;
+  const crossingPose=pointAndTangentAtDistance(path,crossingDistance);
+  if(crossingPose && state.showCrosswalk){
+    const normal=v2(-crossingPose.tangent.y,crossingPose.tangent.x);
+    for(let i=-1;i<=2;i++){
+      const center=add(crossingPose.point,scl(crossingPose.tangent,i*0.62));
+      const bar=boxAlong(
+        add(center,scl(normal,-laneW*0.5)),
+        add(center,scl(normal,laneW*0.5)),
+        {lateral:0,width:0.42,height:0.008,yBottom:0.092,color:COLORS.white,rough:0.6,extend:0},
+      );
+      if(bar) worldGroup.add(bar);
+    }
+  }
+  const yieldPose=pointAndTangentAtDistance(path,total*0.9);
+  if(yieldPose){
+    const normal=v2(-yieldPose.tangent.y,yieldPose.tangent.x);
+    const line=boxAlong(
+      add(yieldPose.point,scl(normal,-laneW*0.5)),
+      add(yieldPose.point,scl(normal,laneW*0.5)),
+      {lateral:0,width:0.32,height:0.01,yBottom:0.094,color:COLORS.white,rough:0.6,extend:0},
+    );
+    if(line) worldGroup.add(line);
+  }
+}
+
+function addRightTurnFacility(fromG,toG){
+  const data=rightTurnPathData(fromG,toG);
+  if(!data) return;
+  const {path,sourceAnchor,targetAnchor,islandStart,islandEnd}=data;
+  const offsets=variableOffsetPath(path,fromG.laneW/2);
+  const surface=buildFlatPoly(offsets.left.concat(offsets.right.slice().reverse()),[],0.082,COLORS.asphalt,{rough:0.95});
+  if(surface) worldGroup.add(surface);
+
+  const inner=offsets.right.slice(islandStart,islandEnd+1);
+  const islandPoints=[sourceAnchor,...inner,targetAnchor];
+  const planted=fromG.arm.rightTurnIsland==='planted';
+  const islandColor=planted ? COLORS.median : COLORS.asphalt;
+  const island=buildFlatPoly(islandPoints,[],planted?0.145:0.086,islandColor,{rough:1});
+  if(island) worldGroup.add(island);
+  for(let i=0;i<islandPoints.length;i++){
+    const next=(i+1)%islandPoints.length;
+    const edge=planted
+      ? boxAlong(islandPoints[i],islandPoints[next],{
+          lateral:0,width:0.18,height:0.14,yBottom:0.02,
+          color:COLORS.curb,rough:0.85,extend:0.03,castShadow:true,
+        })
+      : boxAlong(islandPoints[i],islandPoints[next],{
+          lateral:0,width:0.15,height:0.008,yBottom:0.094,
+          color:COLORS.white,rough:0.6,extend:0,
+        });
+    if(edge) worldGroup.add(edge);
+  }
+  if(!planted && inner.length>1){
+    for(let i=1;i<6;i++){
+      const t=i/6;
+      const a=lerp2(sourceAnchor,targetAnchor,t);
+      const b=lerp2(inner[0],inner.at(-1),Math.min(0.95,t*0.94+0.03));
+      const stripe=boxAlong(a,b,{lateral:0,width:0.13,height:0.008,yBottom:0.096,color:COLORS.white,rough:0.6,extend:0});
+      if(stripe) worldGroup.add(stripe);
+    }
+  }
+  if(state.showArrows) worldGroup.add(buildArrowMeshOnPath(path.slice(3),['right']));
+  addRightTurnCrossingAndYield(path,fromG.laneW);
 }
 
 function addGuardrail(g,uStart,uEnd,lateral,yBottom=0.02,height=0.78){
@@ -580,6 +716,10 @@ function leftTurnLaneCapacity(arm,target){
   return Math.min(2,arm.leftTurnLanes,arm.laneIn-2,target.arm.laneOut);
 }
 
+function rightTurnLaneCapacity(arm,target){
+  return arm?.rightTurnLane && target?.arm?.laneOut>0 && arm.laneIn>0 ? 1 : 0;
+}
+
 function opposingLeftLaneCapacity(opposingG,target){
   const arm=opposingG?.arm;
   if(!arm) return 0;
@@ -757,11 +897,14 @@ function regenerate(){
   });
   const leftTargets=geoms.map(g=>findMovementTarget(g,geoms,'left'));
   const straightTargets=geoms.map(g=>findMovementTarget(g,geoms,'straight'));
+  const rightTargets=geoms.map(g=>findMovementTarget(g,geoms,'right'));
 
   // ---- arm road quads + median + markings + arrows + crosswalk + stop line
   geoms.forEach((g,i)=>{
     const arm = g.arm;
     if(arm.laneIn<=0 && arm.laneOut<=0) return;
+    const rightTarget=rightTargets[i];
+    const dedicatedRightLane=rightTurnLaneCapacity(arm,rightTarget)>0;
     const crosswalkStart=g.R+0.7;
     const crosswalkEnd=Math.min(g.R+4.2,state.armLength-1.8);
     const hasCrosswalkSpace=crosswalkEnd-crosswalkStart>1.2;
@@ -845,7 +988,7 @@ function regenerate(){
     const leftTarget=leftTargets[i];
     const dedicatedLeftLanes=arm.waitingArea==='left' ? leftTurnLaneCapacity(arm,leftTarget) : 0;
     const movementSets=arm.laneIn>0
-      ? laneMovementSets(arm.laneIn,availPerArm[i],dedicatedLeftLanes)
+      ? laneMovementSets(arm.laneIn,availPerArm[i],dedicatedLeftLanes,dedicatedRightLane)
       : [];
 
     // Waiting areas are explicit per approach. Right-turn movements never
@@ -924,6 +1067,11 @@ function regenerate(){
       if(curb) worldGroup.add(curb);
     }
   }
+
+  // ---- physically separated right-turn lanes and their triangular islands
+  geoms.forEach((g,i)=>{
+    if(rightTurnLaneCapacity(g.arm,rightTargets[i])>0) addRightTurnFacility(g,rightTargets[i]);
+  });
 
   // ---- traffic lights (one per arm, near-right corner, pushed outward)
   if(state.showLights){
@@ -1201,6 +1349,7 @@ function normaliseArmValue(field,value){
 
 const CENTER_MODES=new Set(['planted','doubleYellowRail','doubleYellow']);
 const WAITING_AREA_TYPES=new Set(['none','left','straight']);
+const RIGHT_ISLAND_TYPES=new Set(['planted','hatched']);
 function randomCenterMode(){
   const value=Math.random();
   if(value<0.35) return 'planted';
@@ -1215,6 +1364,8 @@ function makeArm(angle,laneIn=2,laneOut=2){
     medianWidth:Math.round((0.8+Math.random()*1.4)*10)/10,
     waitingArea:'none',
     leftTurnLanes:1,
+    rightTurnLane:true,
+    rightTurnIsland:Math.random()<0.5?'planted':'hatched',
     leftGuardrail:Math.random()<0.25,
     rightGuardrail:Math.random()<0.25,
   };
@@ -1223,6 +1374,8 @@ function makeArm(angle,laneIn=2,laneOut=2){
 function normaliseArm(arm){
   if(!CENTER_MODES.has(arm.centerMode)) arm.centerMode='doubleYellow';
   if(!WAITING_AREA_TYPES.has(arm.waitingArea)) arm.waitingArea='none';
+  if(!RIGHT_ISLAND_TYPES.has(arm.rightTurnIsland)) arm.rightTurnIsland='planted';
+  arm.rightTurnLane=Boolean(arm.rightTurnLane);
   arm.medianWidth=normaliseArmValue('medianWidth',Number.isFinite(+arm.medianWidth)?+arm.medianWidth:1);
   arm.leftTurnLanes=normaliseArmValue('leftTurnLanes',Number.isFinite(+arm.leftTurnLanes)?+arm.leftTurnLanes:1);
   arm.leftGuardrail=Boolean(arm.leftGuardrail);
@@ -1239,6 +1392,11 @@ function renderArmsList(){
     const waitingNote=arm.waitingArea==='left'&&arm.laneIn<requiredLeftLanes
       ? `当前配置至少需要 ${requiredLeftLanes} 条进入车道`
       : (arm.waitingArea==='straight'&&arm.laneIn<3 ? '至少需要一条独立直行车道' : '待转区仅在启用交通信号时显示');
+    const hasRightTarget=state.arms.some((target,targetIndex)=>
+      targetIndex!==idx && target.laneOut>0 && classifyArmMovement(arm,target).type==='right');
+    const rightTurnNote=arm.rightTurnLane&&!hasRightTarget
+      ? '没有可连接的右侧出口，右转专用道不会生成'
+      : '最外侧进入车道将在停止线前分叉出右转专用道';
     const row=document.createElement('div');
     row.className='arm-row';
     row.innerHTML=
@@ -1267,7 +1425,15 @@ function renderArmsList(){
           '<option value="2"'+(arm.leftTurnLanes===2?' selected':'')+(arm.laneIn<4?' disabled':'')+'>2 条</option>'+
         '</select></div>'+
       '</div>'+
+      '<div class="facility right-turn-facility">'+
+        '<div><label><input type="checkbox" data-f="rightTurnLane"'+(arm.rightTurnLane?' checked':'')+(arm.laneIn<1?' disabled':'')+'>右转专用道</label></div>'+
+        '<div class="right-turn-island"'+(arm.rightTurnLane?'':' hidden')+'><label>三角区域</label><select data-f="rightTurnIsland">'+
+          '<option value="planted"'+(arm.rightTurnIsland==='planted'?' selected':'')+'>绿化带</option>'+
+          '<option value="hatched"'+(arm.rightTurnIsland==='hatched'?' selected':'')+'>导流线区</option>'+
+        '</select></div>'+
+      '</div>'+
       '<p class="waiting-note">'+waitingNote+'</p>'+
+      '<p class="right-turn-note">'+rightTurnNote+'</p>'+
       '<div class="rail-options">'+
         '<label><input type="checkbox" data-f="leftGuardrail"'+(arm.leftGuardrail?' checked':'')+'>面向路口左侧护栏</label>'+
         '<label><input type="checkbox" data-f="rightGuardrail"'+(arm.rightGuardrail?' checked':'')+'>面向路口右侧护栏</label>'+
@@ -1330,6 +1496,17 @@ function renderArmsList(){
     row.querySelector('[data-f=leftTurnLanes]').addEventListener('change',event=>{
       arm.leftTurnLanes=normaliseArmValue('leftTurnLanes',Number(event.target.value));
       renderArmsList();
+      regenerate();
+    });
+
+    row.querySelector('[data-f=rightTurnLane]').addEventListener('change',event=>{
+      arm.rightTurnLane=event.target.checked;
+      renderArmsList();
+      regenerate();
+    });
+
+    row.querySelector('[data-f=rightTurnIsland]').addEventListener('change',event=>{
+      arm.rightTurnIsland=RIGHT_ISLAND_TYPES.has(event.target.value)?event.target.value:'planted';
       regenerate();
     });
 
@@ -1483,6 +1660,7 @@ function setCameraMode(mode){
 
 document.getElementById('cam3d').addEventListener('click',()=>setCameraMode('3d'));
 document.getElementById('camtop').addEventListener('click',()=>setCameraMode('top'));
+if(new URLSearchParams(window.location.search).get('view')==='top') setCameraMode('top');
 document.getElementById('resetCameraBtn').addEventListener('click',()=>{
   camState.theta=Math.PI*0.28;
   camState.phi=1.02;

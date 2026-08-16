@@ -1,6 +1,6 @@
 import { sanitizeProject } from './state.js';
 
-const STORAGE_KEY = 'intersection-studio.project.v1';
+const STORAGE_KEY = 'intersection-studio.project.v2';
 
 const snapshot = (value) => JSON.stringify(sanitizeProject(value));
 
