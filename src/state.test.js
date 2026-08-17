@@ -18,6 +18,8 @@ describe('project state', () => {
     expect(result.project.arms).toHaveLength(4);
     expect(result.project.arms.every((arm) => arm.waitingArea === 'none')).toBe(true);
     expect(result.project.arms.every((arm) => arm.rightTurnLane)).toBe(true);
+    expect(result.project.arms.every((arm) => ['direct', 'split', 'slip'].includes(arm.rightTurnType))).toBe(true);
+    expect(new Set(result.project.arms.map((arm) => arm.rightTurnType)).size).toBe(3);
     expect(result.project.arms.every((arm) => ['planted', 'hatched'].includes(arm.rightTurnIsland))).toBe(true);
   });
 
@@ -60,9 +62,23 @@ describe('project state', () => {
     });
 
     expect(project.arms[0].rightTurnLane).toBe(true);
+    expect(project.arms[0].rightTurnType).toBe('split');
     expect(project.arms[0].rightTurnIsland).toBe('hatched');
     expect(project.arms[1].rightTurnLane).toBe(false);
+    expect(project.arms[1].rightTurnType).toBe('none');
     expect(project.arms[1].rightTurnIsland).toBe('hatched');
+  });
+
+  it('preserves explicit right-turn facility types and lane counts', () => {
+    const project = sanitizeProject({
+      arms: [
+        { angle: 0, laneIn: 3, laneOut: 2, rightTurnType: 'direct', rightTurnLanes: 2 },
+        { angle: 180, laneIn: 2, laneOut: 2, rightTurnLane: true, rightTurnLanes: 1 },
+      ],
+    });
+
+    expect(project.arms[0]).toMatchObject({ rightTurnType: 'direct', rightTurnLane: true, rightTurnLanes: 2 });
+    expect(project.arms[1]).toMatchObject({ rightTurnType: 'split', rightTurnLane: true, rightTurnLanes: 1 });
   });
 
   it('warns when a right-turn lane has no reachable right-side exit', () => {
@@ -96,7 +112,7 @@ describe('project state', () => {
     const restored = parseProjectDocument(JSON.stringify(document));
 
     expect(restored).toEqual(source);
-    expect(document.version).toBe(2);
+    expect(document.version).toBe(3);
   });
 
   it('calculates stable metrics and deterministic random values', () => {
@@ -116,8 +132,8 @@ describe('project state', () => {
   });
 
   it('samples realistic intersection sizes and preserves enough arm length', () => {
-    expect(sampleIntersectionSize(() => 0)).toBe(34);
-    expect(sampleIntersectionSize(() => 1)).toBe(52);
+    expect(sampleIntersectionSize(() => 0)).toBe(30);
+    expect(sampleIntersectionSize(() => 1)).toBe(42);
     const project = sanitizeProject({ intersectionSize: 60, armLength: 25 });
     expect(project.intersectionSize).toBe(60);
     expect(project.armLength).toBeGreaterThanOrEqual(38);

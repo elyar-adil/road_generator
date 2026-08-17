@@ -24,6 +24,14 @@ describe('road movement orientation',()=>{
     expect([...lanes[2]]).toEqual(['straight']);
   });
 
+  it('reserves the existing outer lanes for a direct multi-lane right turn',()=>{
+    const lanes=laneMovementSets(4,new Set(['left','straight','right']),1,2);
+    expect([...lanes[0]]).toEqual(['left']);
+    expect([...lanes[1]]).toEqual(['straight']);
+    expect([...lanes[2]]).toEqual(['right']);
+    expect([...lanes[3]]).toEqual(['right']);
+  });
+
   it('falls back to the normal movement set when no right target exists',()=>{
     const lanes=laneMovementSets(2,new Set(['straight']),0,true);
     expect(lanes[0].has('straight')).toBe(true);

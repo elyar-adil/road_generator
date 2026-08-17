@@ -1,11 +1,12 @@
 import { classifyArmMovement } from './road-movements.js';
 
 export const PROJECT_FORMAT = 'intersection-studio';
-export const PROJECT_VERSION = 2;
+export const PROJECT_VERSION = 3;
 
 const CENTER_MODES = new Set(['planted', 'doubleYellowRail', 'doubleYellow']);
 const WAITING_AREA_TYPES = new Set(['none', 'left', 'straight']);
 const RIGHT_ISLAND_TYPES = new Set(['planted', 'hatched']);
+export const RIGHT_TURN_TYPES = new Set(['none', 'direct', 'split', 'slip']);
 
 const DEFAULT_ARMS = [
   { angle: 0, laneIn: 2, laneOut: 2, centerMode: 'planted', medianWidth: 1.2, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, rightTurnLane: true, rightTurnIsland: 'planted', leftGuardrail: false, rightGuardrail: false },
@@ -20,11 +21,10 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
 const boolean = (value, fallback) => typeof value === 'boolean' ? value : fallback;
 
 // CJJ 37 / CJJ 152 place urban intersection lanes mostly in the 3.0–3.5 m
-// range. For a three-lane approach plus the opposing carriageway, median and
-// pedestrian clearances, a 34–52 m core is a practical urban distribution;
-// 42 m is used as its most likely value rather than a uniform random midpoint.
+// range. For the compact urban layouts modelled here, a 30–42 m core retains
+// pedestrian clearances while keeping channelized right turns proportionate.
 export function sampleIntersectionSize(random = Math.random) {
-  const min = 34, mode = 42, max = 52;
+  const min = 30, mode = 34, max = 42;
   const unit = clamp(finite(random(), 0.5), 0, 1);
   const split = (mode - min) / (max - min);
   const value = unit < split
@@ -45,9 +45,15 @@ export function sanitizeArm(arm = {}) {
   const centerMode = CENTER_MODES.has(arm.centerMode) ? arm.centerMode : 'doubleYellow';
   const waitingArea = WAITING_AREA_TYPES.has(arm.waitingArea) ? arm.waitingArea : 'none';
   const explicitRightTurnLane = typeof arm.rightTurnLane === 'boolean';
-  const rightTurnLanes = explicitRightTurnLane
-    ? (arm.rightTurnLane ? clamp(Math.round(finite(arm.rightTurnLanes, 1)), 1, 2) : 0)
-    : clamp(Math.round(finite(arm.rightTurnLanes, 1)), 0, 2);
+  const legacyRightTurnEnabled = explicitRightTurnLane
+    ? arm.rightTurnLane
+    : finite(arm.rightTurnLanes, 1) > 0;
+  const rightTurnType = RIGHT_TURN_TYPES.has(arm.rightTurnType)
+    ? arm.rightTurnType
+    : (legacyRightTurnEnabled ? 'split' : 'none');
+  const rightTurnLanes = rightTurnType === 'none'
+    ? 0
+    : clamp(Math.round(finite(arm.rightTurnLanes, 1)), 1, 2);
   const rightTurnIsland = RIGHT_ISLAND_TYPES.has(arm.rightTurnIsland) ? arm.rightTurnIsland : 'hatched';
   return {
     angle: normalizeAngle(arm.angle),
@@ -58,7 +64,8 @@ export function sanitizeArm(arm = {}) {
     waitingArea,
     leftTurnLanes: clamp(Math.round(finite(arm.leftTurnLanes, 1)), 1, 2),
     rightTurnLanes,
-    rightTurnLane: rightTurnLanes > 0,
+    rightTurnLane: rightTurnType !== 'none',
+    rightTurnType,
     rightTurnIsland,
     leftGuardrail: Boolean(arm.leftGuardrail),
     rightGuardrail: Boolean(arm.rightGuardrail),
@@ -66,10 +73,19 @@ export function sanitizeArm(arm = {}) {
 }
 
 export function createDefaultProject() {
-  const scenerySeed = 20260816;
+  const scenerySeed = 1 + Math.floor(Math.random() * 99999998);
+  const rightTurnRandom = createSeededRandom(scenerySeed);
+  const rightTurnTypes = ['direct', 'split', 'slip'];
+  for (let index = rightTurnTypes.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(rightTurnRandom() * (index + 1));
+    [rightTurnTypes[index], rightTurnTypes[swapIndex]] = [rightTurnTypes[swapIndex], rightTurnTypes[index]];
+  }
   return {
     projectName: '城市十字路口',
-    arms: clone(DEFAULT_ARMS),
+    arms: clone(DEFAULT_ARMS).map((arm) => ({
+      ...arm,
+      rightTurnType: rightTurnTypes[arm.angle / 90 % rightTurnTypes.length],
+    })),
     laneWidth: 3.25,
     intersectionSize: sampleIntersectionSize(createSeededRandom(scenerySeed)),
     armLength: 46,
@@ -173,7 +189,7 @@ export function validateProject(value) {
       });
       if (!hasStraightTarget) warnings.push(`分支 ${index + 1} 没有可连接的直行出口`);
     }
-    if (arm.rightTurnLanes > 0) {
+    if (arm.rightTurnType !== 'none') {
       const rightTargets = project.arms.map((target, targetIndex) => {
         if (targetIndex === index || target.laneOut <= 0) return false;
         const movement=classifyArmMovement(arm,target);
@@ -183,7 +199,7 @@ export function validateProject(value) {
         warnings.push(`分支 ${index + 1} 没有进入车道，无法设置右转专用道`);
       } else if (!rightTargets.length) {
         warnings.push(`分支 ${index + 1} 没有可连接的右侧出口，右转专用道将不生成`);
-      } else if (arm.laneIn < arm.rightTurnLanes) {
+      } else if (arm.rightTurnLanes > arm.laneIn) {
         warnings.push(`分支 ${index + 1} 的进入车道不足以设置 ${arm.rightTurnLanes} 条右转专用道`);
       } else if (rightTargets[0].target.laneOut < arm.rightTurnLanes) {
         warnings.push(`分支 ${index + 1} 的右侧出口车道不足以连接 ${arm.rightTurnLanes} 条右转专用道`);

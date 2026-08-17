@@ -301,54 +301,106 @@ function appendCubic2(path,p0,p1,p2,p3,segments=8){
   for(let i=1;i<=segments;i++) path.push(cubicPoint2(p0,p1,p2,p3,i/segments));
 }
 
-function rightTurnPathData(fromG,toG){
-  if(!fromG || !toG || fromG.arm.laneIn<1 || toG.arm.laneOut<1) return null;
+function rightTurnLaneCenter(g,laneIndex,direction){
+  return direction==='source'
+    ? g.outOuterS+(laneIndex+0.5)*g.laneW
+    : g.inOuterS-(laneIndex+0.5)*g.laneW;
+}
+
+function buildDirectRightTurnPath(fromG,toG,laneIndex){
+  const start=fromG.wp(fromG.R+0.15,rightTurnLaneCenter(fromG,laneIndex,'source'));
+  const end=toG.wp(toG.R+0.15,rightTurnLaneCenter(toG,laneIndex,'target'));
+  const chord=len(sub(end,start));
+  if(chord<1.5) return null;
+  const handle=Math.min(12,Math.max(3.2,chord*0.34));
+  const path=[start];
+  appendCubic2(path,
+    start,add(start,scl(fromG.fwd,-handle)),
+    add(end,scl(toG.fwd,-handle)),end,14,
+  );
+  return path;
+}
+
+function offsetLanePaths(path,laneCount,laneWidth,taperPoints=0){
+  const bundleWidth=laneCount*laneWidth;
+  return Array.from({length:laneCount},(_,laneIndex)=>path.map((point,index)=>{
+    const previous=path[Math.max(0,index-1)], next=path[Math.min(path.length-1,index+1)];
+    const tangent=sub(next,previous), tangentLength=len(tangent)||1;
+    const normal=v2(-tangent.y/tangentLength,tangent.x/tangentLength);
+    const offset=bundleWidth/2-(laneIndex+0.5)*laneWidth;
+    const taper=taperPoints>0 ? Math.min(1,index/taperPoints) : 1;
+    return add(point,scl(normal,offset*taper));
+  }));
+}
+
+function rightTurnPathData(fromG,toG,type,laneCount){
+  if(!fromG || !toG || laneCount<1) return null;
+  if(type==='direct'){
+    const lanePaths=Array.from({length:laneCount},(_,laneIndex)=>
+      buildDirectRightTurnPath(fromG,toG,laneIndex),
+    ).filter(Boolean);
+    return lanePaths.length===laneCount ? {type,lanePaths} : null;
+  }
+
   const laneW=fromG.laneW;
-  const sourceOuterS=fromG.outOuterS;
-  const sourceBranchCenterS=sourceOuterS-laneW*0.5;
-  const targetOuterS=toG.inOuterS;
-  const {cornerU,splitU}=computeRightTurnLayout({
+  const bundleWidth=laneW*laneCount;
+  const {turnU,nearSplitU,slipSplitU,targetMergeU}=computeRightTurnLayout({
     fromRadius:fromG.R,
     targetRadius:toG.R,
     armLength:state.armLength,
     laneWidth:laneW,
   });
-  // The fork nose starts on the existing outer road edge.  The branch then
-  // widens outward by one lane instead of stealing width from the through
-  // carriageway.
-  const sourceFar=fromG.wp(splitU,sourceOuterS);
-  const sourceNear=fromG.wp(cornerU,sourceBranchCenterS);
-  const targetNear=toG.wp(cornerU,targetOuterS+laneW*0.5);
-  const chord=len(sub(sourceNear,targetNear));
-  if(chord<2) return null;
-  const handle=Math.min(12,Math.max(3.5,chord*0.34));
-  const sourceToNear=len(sub(sourceFar,sourceNear));
-  const sourceHandle=Math.min(10,Math.max(3,sourceToNear*0.42));
-  const path=[sourceFar];
+  const splitU=type==='slip' ? slipSplitU : nearSplitU;
+  const sourceAnchor=fromG.wp(splitU,fromG.outOuterS+bundleWidth/2);
+  const sourceNear=fromG.wp(turnU,fromG.outOuterS-bundleWidth/2);
+  const targetNear=toG.wp(turnU,toG.inOuterS-bundleWidth/2);
+  const targetAnchor=toG.wp(targetMergeU,toG.inOuterS-bundleWidth/2);
+  const turnChord=len(sub(sourceNear,targetNear));
+  if(turnChord<2) return null;
+  const turnHandle=Math.min(18,Math.max(4.5,turnChord*0.39));
+  const sourceHandle=Math.min(10,Math.max(3,len(sub(sourceAnchor,sourceNear))*0.42));
+  const path=[sourceAnchor];
   appendCubic2(path,
-    sourceFar, add(sourceFar,scl(fromG.fwd,-sourceHandle)),
-    add(sourceNear,scl(fromG.fwd,sourceHandle)), sourceNear, 8);
-  const islandStart=path.length-1;
+    sourceAnchor,add(sourceAnchor,scl(fromG.fwd,-sourceHandle)),
+    add(sourceNear,scl(fromG.fwd,sourceHandle)),sourceNear,8,
+  );
+  const sourceTaperEnd=path.length-1;
   appendCubic2(path,
-    sourceNear, add(sourceNear,scl(fromG.fwd,-handle)),
-    add(targetNear,scl(toG.fwd,-handle)), targetNear, 14);
-  const islandEnd=path.length-1;
+    sourceNear,add(sourceNear,scl(fromG.fwd,-turnHandle)),
+    add(targetNear,scl(toG.fwd,-turnHandle)),targetNear,14,
+  );
+  const turnEnd=path.length-1;
+  for(let index=1;index<=6;index++) path.push(lerp2(targetNear,targetAnchor,index/6));
+  const offsets=variableOffsetPath(path,bundleWidth/2,0);
+  const entryDivider=[
+    fromG.wp(splitU,fromG.outOuterS+bundleWidth),
+    fromG.wp(turnU,fromG.outOuterS+bundleWidth),
+  ];
+  const mergeDivider=[
+    toG.wp(turnU,toG.inOuterS-bundleWidth),
+    toG.wp(targetMergeU,toG.inOuterS-bundleWidth),
+  ];
+  const guideInner=offsets.right.slice(sourceTaperEnd,turnEnd+1);
+  const guideApex=lineIntersect(
+    guideInner[0],add(guideInner[0],scl(fromG.fwd,-1)),
+    guideInner.at(-1),add(guideInner.at(-1),scl(toG.fwd,-1)),
+  ) ?? lerp2(guideInner[0],guideInner.at(-1),0.5);
   return {
-    path,
-    sourceAnchor: sourceFar,
-    targetAnchor: targetNear,
-    islandStart,
-    islandEnd,
+    type,path,offsets,lanePaths:offsetLanePaths(path,laneCount,laneW),
+    sourceAnchor,targetAnchor,sourceTaperEnd,turnEnd,
+    outerBoundary:offsets.left,innerBoundary:offsets.right,
+    entryDivider,mergeDivider,guideInner,guideApex,
+    splitU,targetMergeU,bundleWidth,
   };
 }
 
-function variableOffsetPath(path,halfWidth,taperPoints=4){
+function variableOffsetPath(path,halfWidth,taperPoints=0){
   const left=[],right=[];
   for(let i=0;i<path.length;i++){
     const previous=path[Math.max(0,i-1)], next=path[Math.min(path.length-1,i+1)];
     const tangent=sub(next,previous), tangentLen=len(tangent)||1;
     const normal=v2(-tangent.y/tangentLen,tangent.x/tangentLen);
-    const scaleFactor=Math.min(1,i/Math.max(1,taperPoints));
+    const scaleFactor=taperPoints>0 ? Math.min(1,i/taperPoints) : 1;
     left.push(add(path[i],scl(normal,halfWidth*scaleFactor)));
     right.push(add(path[i],scl(normal,-halfWidth*scaleFactor)));
   }
@@ -384,44 +436,28 @@ function addRightTurnCrossingAndYield(path,laneW){
   }
 }
 
-function addRightTurnFacility(fromG,toG){
-  const data=rightTurnPathData(fromG,toG);
+function addRightTurnFacility(fromG,facility){
+  const {data,laneCount,type}=facility;
   if(!data) return;
-  const {path,sourceAnchor,targetAnchor,islandStart,islandEnd}=data;
-  const offsets=variableOffsetPath(path,fromG.laneW/2);
+  if(type==='direct'){
+    for(let lane=1;lane<data.lanePaths.length;lane++){
+      const divider=averagePaths(data.lanePaths[lane-1],data.lanePaths[lane]);
+      addDashedPath(divider);
+    }
+    return;
+  }
+
+  const {offsets,innerBoundary,sourceTaperEnd,turnEnd,entryDivider,mergeDivider}=data;
   const surface=buildFlatPoly(offsets.left.concat(offsets.right.slice().reverse()),[],0.082,COLORS.asphalt,{rough:0.95});
   if(surface) worldGroup.add(surface);
-
-  const inner=offsets.right.slice(islandStart,islandEnd+1);
-  const islandPoints=[sourceAnchor,...inner,targetAnchor];
-  const planted=fromG.arm.rightTurnIsland==='planted';
-  const islandColor=planted ? COLORS.median : COLORS.asphalt;
-  const island=buildFlatPoly(islandPoints,[],planted?0.145:0.086,islandColor,{rough:1});
-  if(island) worldGroup.add(island);
-  for(let i=0;i<islandPoints.length;i++){
-    const next=(i+1)%islandPoints.length;
-    const edge=planted
-      ? boxAlong(islandPoints[i],islandPoints[next],{
-          lateral:0,width:0.18,height:0.14,yBottom:0.02,
-          color:COLORS.curb,rough:0.85,extend:0.03,castShadow:true,
-        })
-      : boxAlong(islandPoints[i],islandPoints[next],{
-          lateral:0,width:0.15,height:0.008,yBottom:0.094,
-          color:COLORS.white,rough:0.6,extend:0,
-        });
-    if(edge) worldGroup.add(edge);
+  for(let lane=1;lane<data.lanePaths.length;lane++) addDashedPath(averagePaths(data.lanePaths[lane-1],data.lanePaths[lane]));
+  addRoadDashedPath(entryDivider);
+  addSolidPath(innerBoundary.slice(sourceTaperEnd,turnEnd+1));
+  addRoadDashedPath(mergeDivider);
+  addRightTurnGuideArea(fromG,data);
+  if(state.showArrows){
+    data.lanePaths.forEach(lanePath=>worldGroup.add(buildArrowMeshOnPath(lanePath.slice(3),['right'])));
   }
-  if(!planted && inner.length>1){
-    for(let i=1;i<6;i++){
-      const t=i/6;
-      const a=lerp2(sourceAnchor,targetAnchor,t);
-      const b=lerp2(inner[0],inner.at(-1),Math.min(0.95,t*0.94+0.03));
-      const stripe=boxAlong(a,b,{lateral:0,width:0.13,height:0.008,yBottom:0.096,color:COLORS.white,rough:0.6,extend:0});
-      if(stripe) worldGroup.add(stripe);
-    }
-  }
-  if(state.showArrows) worldGroup.add(buildArrowMeshOnPath(path.slice(3),['right']));
-  addRightTurnCrossingAndYield(path,fromG.laneW);
 }
 
 function addGuardrail(g,uStart,uEnd,lateral,yBottom=0.02,height=0.78){
@@ -647,6 +683,100 @@ function addDashedPath(path){
   });
 }
 
+function addSolidPath(path,width=WAITING_LINE_WIDTH){
+  for(let index=0;index<path.length-1;index++){
+    const segment=boxAlong(path[index],path[index+1],{
+      lateral:0,width,height:0.008,yBottom:0.09,
+      color:COLORS.white,rough:0.6,extend:0,
+    });
+    if(segment) worldGroup.add(segment);
+  }
+}
+
+function addRoadDashedPath(path){
+  buildDashedSegments(path,1.25,1.0).forEach(([p0,p1])=>{
+    const segment=boxAlong(p0,p1,{
+      lateral:0,width:0.15,height:0.008,yBottom:0.09,
+      color:COLORS.white,rough:0.6,extend:0,
+    });
+    if(segment) worldGroup.add(segment);
+  });
+}
+
+function roundedGuideCorner(previous,corner,next,radius,segments=4){
+  const toPrevious=sub(previous,corner), toNext=sub(next,corner);
+  const previousLength=len(toPrevious), nextLength=len(toNext);
+  if(previousLength<1e-4 || nextLength<1e-4) return [corner];
+  const cut=Math.min(radius,previousLength*0.28,nextLength*0.28);
+  const entryPoint=add(corner,scl(toPrevious,cut/previousLength));
+  const exitPoint=add(corner,scl(toNext,cut/nextLength));
+  const points=[entryPoint];
+  for(let segmentIndex=1;segmentIndex<segments;segmentIndex++){
+    const progress=segmentIndex/segments, inverse=1-progress;
+    points.push(v2(
+      inverse*inverse*entryPoint.x+2*inverse*progress*corner.x+progress*progress*exitPoint.x,
+      inverse*inverse*entryPoint.y+2*inverse*progress*corner.y+progress*progress*exitPoint.y,
+    ));
+  }
+  points.push(exitPoint);
+  return points;
+}
+
+function addRightTurnGuideArea(fromG,data){
+  const {guideInner,guideApex}=data;
+  if(guideInner.length<3) return;
+  const sourceCorner=roundedGuideCorner(guideApex,guideInner[0],guideInner[1],1.35);
+  const targetCorner=roundedGuideCorner(guideInner.at(-2),guideInner.at(-1),guideApex,1.35);
+  const apexCorner=roundedGuideCorner(guideInner.at(-1),guideApex,guideInner[0],1.5);
+  const guidePoints=[
+    ...sourceCorner,
+    ...guideInner.slice(1,-1),
+    ...targetCorner,
+    ...apexCorner,
+  ];
+  const planted=fromG.arm.rightTurnIsland==='planted';
+  const surface=buildFlatPoly(guidePoints,[],planted?0.145:0.086,planted?COLORS.median:COLORS.asphalt,{rough:1});
+  if(surface) worldGroup.add(surface);
+  for(let index=0;index<guidePoints.length;index++){
+    const nextIndex=(index+1)%guidePoints.length;
+    const edge=planted
+      ? boxAlong(guidePoints[index],guidePoints[nextIndex],{
+          lateral:0,width:0.18,height:0.14,yBottom:0.02,
+          color:COLORS.curb,rough:0.85,extend:0.03,castShadow:true,
+        })
+      : boxAlong(guidePoints[index],guidePoints[nextIndex],{
+          lateral:0,width:0.15,height:0.008,yBottom:0.094,
+          color:COLORS.white,rough:0.6,extend:0,
+        });
+    if(edge) worldGroup.add(edge);
+  }
+  if(!planted){
+    for(let index=1;index<6;index++){
+      const t=index/6;
+      const innerIndex=Math.round((guideInner.length-1)*t);
+      const guidePoint=guideInner[innerIndex];
+      const previousPoint=guideInner[Math.max(0,innerIndex-1)];
+      const nextPoint=guideInner[Math.min(guideInner.length-1,innerIndex+1)];
+      const guideTangent=sub(nextPoint,previousPoint);
+      const tangentLength=len(guideTangent)||1;
+      const tangent=scl(guideTangent,1/tangentLength);
+      const baseCenter=lerp2(guidePoint,guideApex,0.2);
+      const tip=lerp2(guidePoint,guideApex,0.48);
+      const legHalfWidth=Math.min(0.9,len(sub(guidePoint,guideApex))*0.17);
+      const firstBase=add(baseCenter,scl(tangent,-legHalfWidth));
+      const secondBase=add(baseCenter,scl(tangent,legHalfWidth));
+      const firstLeg=boxAlong(firstBase,tip,{
+        lateral:0,width:0.13,height:0.008,yBottom:0.096,color:COLORS.white,rough:0.6,extend:0,
+      });
+      const secondLeg=boxAlong(secondBase,tip,{
+        lateral:0,width:0.13,height:0.008,yBottom:0.096,color:COLORS.white,rough:0.6,extend:0,
+      });
+      if(firstLeg) worldGroup.add(firstLeg);
+      if(secondLeg) worldGroup.add(secondLeg);
+    }
+  }
+}
+
 function buildArrowMeshOnPath(path,types){
   const group=new THREE.Group();
   const total=polylineLength(path);
@@ -717,7 +847,17 @@ function leftTurnLaneCapacity(arm,target){
 }
 
 function rightTurnLaneCapacity(arm,target){
-  return arm?.rightTurnLane && target?.arm?.laneOut>0 && arm.laneIn>0 ? 1 : 0;
+  if(!arm?.rightTurnLane || arm.rightTurnType==='none' || !target?.arm) return 0;
+  const requested=Math.min(2,arm.rightTurnLanes);
+  return arm.laneIn>=requested && target.arm.laneOut>=requested ? requested : 0;
+}
+
+function createRightTurnFacility(fromG,toG){
+  const laneCount=rightTurnLaneCapacity(fromG.arm,toG);
+  if(!laneCount) return null;
+  const type=fromG.arm.rightTurnType;
+  const data=rightTurnPathData(fromG,toG,type,laneCount);
+  return data ? {type,laneCount,data,target:toG} : null;
 }
 
 function opposingLeftLaneCapacity(opposingG,target){
@@ -898,13 +1038,16 @@ function regenerate(){
   const leftTargets=geoms.map(g=>findMovementTarget(g,geoms,'left'));
   const straightTargets=geoms.map(g=>findMovementTarget(g,geoms,'straight'));
   const rightTargets=geoms.map(g=>findMovementTarget(g,geoms,'right'));
+  const rightFacilities=geoms.map((g,index)=>createRightTurnFacility(g,rightTargets[index]));
 
   // ---- arm road quads + median + markings + arrows + crosswalk + stop line
   geoms.forEach((g,i)=>{
     const arm = g.arm;
     if(arm.laneIn<=0 && arm.laneOut<=0) return;
-    const rightTarget=rightTargets[i];
-    const dedicatedRightLane=rightTurnLaneCapacity(arm,rightTarget)>0;
+    const rightFacility=rightFacilities[i];
+    const rightLaneSetting=rightFacility
+      ? (rightFacility.type==='direct' ? rightFacility.laneCount : true)
+      : 0;
     const crosswalkStart=g.R+0.7;
     const crosswalkEnd=Math.min(g.R+4.2,state.armLength-1.8);
     const hasCrosswalkSpace=crosswalkEnd-crosswalkStart>1.2;
@@ -962,8 +1105,16 @@ function regenerate(){
     // Names are from the viewpoint of standing at the outer end facing the intersection.
     const sideRailStart=stopU+1.2;
     const sideRailEnd=state.armLength-0.7;
-    if(arm.leftGuardrail) addGuardrail(g,sideRailStart,sideRailEnd,g.outOuterS-0.22,0.12,0.82);
-    if(arm.rightGuardrail) addGuardrail(g,sideRailStart,sideRailEnd,g.inOuterS+0.22,0.12,0.82);
+    if(arm.leftGuardrail) addGuardrail(g,sideRailStart,sideRailEnd,g.inOuterS+0.22,0.12,0.82);
+    if(arm.rightGuardrail){
+      const rightRailStart=rightFacility&&rightFacility.type!=='direct'
+        ? Math.max(sideRailStart,rightFacility.data.splitU+0.5)
+        : sideRailStart;
+      const rightRailLateral=rightFacility&&rightFacility.type!=='direct'
+        ? g.outOuterS-rightFacility.data.bundleWidth-0.22
+        : g.outOuterS-0.22;
+      addGuardrail(g,rightRailStart,sideRailEnd,rightRailLateral,0.12,0.82);
+    }
 
     // stop line (inbound only)
     if(arm.laneIn>0){
@@ -988,7 +1139,7 @@ function regenerate(){
     const leftTarget=leftTargets[i];
     const dedicatedLeftLanes=arm.waitingArea==='left' ? leftTurnLaneCapacity(arm,leftTarget) : 0;
     const movementSets=arm.laneIn>0
-      ? laneMovementSets(arm.laneIn,availPerArm[i],dedicatedLeftLanes,dedicatedRightLane)
+      ? laneMovementSets(arm.laneIn,availPerArm[i],dedicatedLeftLanes,rightLaneSetting)
       : [];
 
     // Waiting areas are explicit per approach. Right-turn movements never
@@ -1057,7 +1208,13 @@ function regenerate(){
   for(let i=0;i<n;i++){
     const j=(i+1)%n;
     const gi=geoms[i], gj=geoms[j];
-    const path = [gi.farLeft, gi.nearLeft, ...filletPts[i], gj.nearRight, gj.farRight];
+    const rightFacility=rightFacilities[j];
+    const bypassesCorner=rightFacility
+      && rightFacility.type!=='direct'
+      && rightFacility.target===gi;
+    const path=bypassesCorner
+      ? [gi.farLeft,...rightFacility.data.outerBoundary.slice().reverse(),gj.farRight]
+      : [gi.farLeft, gi.nearLeft, ...filletPts[i], gj.nearRight, gj.farRight];
     if(state.showSidewalk){
       const sw = buildPathStrip(path, state.sidewalkWidth, 0.32+state.sidewalkWidth/2);
       if(sw) worldGroup.add(sw);
@@ -1068,9 +1225,10 @@ function regenerate(){
     }
   }
 
-  // ---- physically separated right-turn lanes and their triangular islands
+  // ---- right-turn facilities; direct connectors reuse the intersection
+  // pavement, while split/slip facilities add an outside roadway and island.
   geoms.forEach((g,i)=>{
-    if(rightTurnLaneCapacity(g.arm,rightTargets[i])>0) addRightTurnFacility(g,rightTargets[i]);
+    if(rightFacilities[i]) addRightTurnFacility(g,rightFacilities[i]);
   });
 
   // ---- traffic lights (one per arm, near-right corner, pushed outward)
@@ -1344,12 +1502,14 @@ function normaliseArmValue(field,value){
   if(field==='angle') return ((Math.round(value)%360)+360)%360;
   if(field==='medianWidth') return Math.min(4,Math.max(0,Math.round(value*10)/10));
   if(field==='leftTurnLanes') return Math.min(2,Math.max(1,Math.round(value)));
+  if(field==='rightTurnLanes') return Math.min(2,Math.max(1,Math.round(value)));
   return Math.min(6,Math.max(0,Math.round(value)));
 }
 
 const CENTER_MODES=new Set(['planted','doubleYellowRail','doubleYellow']);
 const WAITING_AREA_TYPES=new Set(['none','left','straight']);
 const RIGHT_ISLAND_TYPES=new Set(['planted','hatched']);
+const RIGHT_TURN_TYPES=new Set(['none','direct','split','slip']);
 function randomCenterMode(){
   const value=Math.random();
   if(value<0.35) return 'planted';
@@ -1365,6 +1525,8 @@ function makeArm(angle,laneIn=2,laneOut=2){
     waitingArea:'none',
     leftTurnLanes:1,
     rightTurnLane:true,
+    rightTurnLanes:1,
+    rightTurnType:['direct','split','slip'][Math.floor(Math.random()*3)],
     rightTurnIsland:Math.random()<0.5?'planted':'hatched',
     leftGuardrail:Math.random()<0.25,
     rightGuardrail:Math.random()<0.25,
@@ -1375,9 +1537,13 @@ function normaliseArm(arm){
   if(!CENTER_MODES.has(arm.centerMode)) arm.centerMode='doubleYellow';
   if(!WAITING_AREA_TYPES.has(arm.waitingArea)) arm.waitingArea='none';
   if(!RIGHT_ISLAND_TYPES.has(arm.rightTurnIsland)) arm.rightTurnIsland='planted';
-  arm.rightTurnLane=Boolean(arm.rightTurnLane);
+  if(!RIGHT_TURN_TYPES.has(arm.rightTurnType)) arm.rightTurnType=arm.rightTurnLane?'split':'none';
+  arm.rightTurnLane=arm.rightTurnType!=='none';
   arm.medianWidth=normaliseArmValue('medianWidth',Number.isFinite(+arm.medianWidth)?+arm.medianWidth:1);
   arm.leftTurnLanes=normaliseArmValue('leftTurnLanes',Number.isFinite(+arm.leftTurnLanes)?+arm.leftTurnLanes:1);
+  arm.rightTurnLanes=arm.rightTurnLane
+    ? normaliseArmValue('rightTurnLanes',Number.isFinite(+arm.rightTurnLanes)?+arm.rightTurnLanes:1)
+    : 0;
   arm.leftGuardrail=Boolean(arm.leftGuardrail);
   arm.rightGuardrail=Boolean(arm.rightGuardrail);
   return arm;
@@ -1395,8 +1561,14 @@ function renderArmsList(){
     const hasRightTarget=state.arms.some((target,targetIndex)=>
       targetIndex!==idx && target.laneOut>0 && classifyArmMovement(arm,target).type==='right');
     const rightTurnNote=arm.rightTurnLane&&!hasRightTarget
-      ? '没有可连接的右侧出口，右转专用道不会生成'
-      : '最外侧进入车道将在停止线前分叉出右转专用道';
+      ? '没有可连接的右侧出口，右转设施不会生成'
+      : arm.rightTurnType==='direct'
+        ? '最右侧 '+arm.rightTurnLanes+' 条既有进口车道直接连接至右侧出口最外侧车道'
+        : arm.rightTurnType==='split'
+          ? '主线保持直行，在路口近端分出 '+arm.rightTurnLanes+' 条右转车道'
+          : arm.rightTurnType==='slip'
+            ? '上游分出 '+arm.rightTurnLanes+' 条右转辅路，绕岛后接右侧出口'
+            : '启用后可选择直接连接、近端分流或右转辅路';
     const row=document.createElement('div');
     row.className='arm-row';
     row.innerHTML=
@@ -1427,7 +1599,16 @@ function renderArmsList(){
       '</div>'+
       '<div class="facility right-turn-facility">'+
         '<div><label><input type="checkbox" data-f="rightTurnLane"'+(arm.rightTurnLane?' checked':'')+(arm.laneIn<1?' disabled':'')+'>右转专用道</label></div>'+
-        '<div class="right-turn-island"'+(arm.rightTurnLane?'':' hidden')+'><label>三角区域</label><select data-f="rightTurnIsland">'+
+        '<div class="right-turn-options"'+(arm.rightTurnLane?'':' hidden')+'><label>右转形式</label><select data-f="rightTurnType">'+
+          '<option value="direct"'+(arm.rightTurnType==='direct'?' selected':'')+'>既有车道直接连接</option>'+
+          '<option value="split"'+(arm.rightTurnType==='split'?' selected':'')+'>近端分流右转车道</option>'+
+          '<option value="slip"'+(arm.rightTurnType==='slip'?' selected':'')+'>远端分流右转辅路</option>'+
+        '</select></div>'+
+        '<div class="right-turn-options"'+(arm.rightTurnLane?'':' hidden')+'><label>右转车道</label><select data-f="rightTurnLanes">'+
+          '<option value="1"'+(arm.rightTurnLanes===1?' selected':'')+'>1 条</option>'+
+          '<option value="2"'+(arm.rightTurnLanes===2?' selected':'')+(arm.laneIn<2?' disabled':'')+'>2 条</option>'+
+        '</select></div>'+
+        '<div class="right-turn-island"'+(arm.rightTurnLane&&arm.rightTurnType!=='direct'?'':' hidden')+'><label>三角区域</label><select data-f="rightTurnIsland">'+
           '<option value="planted"'+(arm.rightTurnIsland==='planted'?' selected':'')+'>绿化带</option>'+
           '<option value="hatched"'+(arm.rightTurnIsland==='hatched'?' selected':'')+'>导流线区</option>'+
         '</select></div>'+
@@ -1500,7 +1681,22 @@ function renderArmsList(){
     });
 
     row.querySelector('[data-f=rightTurnLane]').addEventListener('change',event=>{
-      arm.rightTurnLane=event.target.checked;
+      arm.rightTurnType=event.target.checked
+        ? (arm.rightTurnType==='none'?'direct':arm.rightTurnType)
+        : 'none';
+      renderArmsList();
+      regenerate();
+    });
+
+    row.querySelector('[data-f=rightTurnType]').addEventListener('change',event=>{
+      arm.rightTurnType=RIGHT_TURN_TYPES.has(event.target.value)?event.target.value:'direct';
+      arm.rightTurnLane=arm.rightTurnType!=='none';
+      renderArmsList();
+      regenerate();
+    });
+
+    row.querySelector('[data-f=rightTurnLanes]').addEventListener('change',event=>{
+      arm.rightTurnLanes=normaliseArmValue('rightTurnLanes',Number(event.target.value));
       renderArmsList();
       regenerate();
     });
