@@ -23,7 +23,10 @@ export function classifyArmMovement(fromArm,toArm){
 
 export function laneMovementSets(laneCount,available,dedicatedLeftLanes=0,dedicatedRightLanes=0){
   const order=['straight','right','left'];
-  const rightCount=Math.min(laneCount,Math.max(0,Math.round(dedicatedRightLanes)));
+  const rightCount=typeof dedicatedRightLanes==='boolean'
+    ? 0
+    : Math.min(laneCount,Math.max(0,Math.round(dedicatedRightLanes)));
+  const rightBranchSplitsOff=dedicatedRightLanes===true;
   const fallback=order.find(type=>available.has(type))
     || (available.has('right')?'right':'straight');
   if(laneCount<=0) return [];
@@ -37,7 +40,7 @@ export function laneMovementSets(laneCount,available,dedicatedLeftLanes=0,dedica
     for(let lane=laneCount-rightCount;lane<laneCount;lane++){
       if(lane>=0) lanes[lane].add('right');
     }
-    if(rightCount===0) lanes[laneCount-1].add('right');
+    if(rightCount===0 && !rightBranchSplitsOff) lanes[laneCount-1].add('right');
   }
   const leftCount=available.has('left')
     ? Math.min(laneCount-rightCount,Math.max(1,dedicatedLeftLanes))

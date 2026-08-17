@@ -5,12 +5,13 @@ export const PROJECT_VERSION = 2;
 
 const CENTER_MODES = new Set(['planted', 'doubleYellowRail', 'doubleYellow']);
 const WAITING_AREA_TYPES = new Set(['none', 'left', 'straight']);
+const RIGHT_ISLAND_TYPES = new Set(['planted', 'hatched']);
 
 const DEFAULT_ARMS = [
-  { angle: 0, laneIn: 2, laneOut: 2, centerMode: 'planted', medianWidth: 1.2, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, leftGuardrail: false, rightGuardrail: false },
-  { angle: 90, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, leftGuardrail: false, rightGuardrail: true },
-  { angle: 180, laneIn: 3, laneOut: 2, centerMode: 'doubleYellowRail', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, leftGuardrail: false, rightGuardrail: false },
-  { angle: 270, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, leftGuardrail: true, rightGuardrail: false },
+  { angle: 0, laneIn: 2, laneOut: 2, centerMode: 'planted', medianWidth: 1.2, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, rightTurnLane: true, rightTurnIsland: 'planted', leftGuardrail: false, rightGuardrail: false },
+  { angle: 90, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, rightTurnLane: true, rightTurnIsland: 'planted', leftGuardrail: false, rightGuardrail: true },
+  { angle: 180, laneIn: 3, laneOut: 2, centerMode: 'doubleYellowRail', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, rightTurnLane: true, rightTurnIsland: 'hatched', leftGuardrail: false, rightGuardrail: false },
+  { angle: 270, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, rightTurnLane: true, rightTurnIsland: 'hatched', leftGuardrail: true, rightGuardrail: false },
 ];
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -43,6 +44,11 @@ export function angleDistance(a, b) {
 export function sanitizeArm(arm = {}) {
   const centerMode = CENTER_MODES.has(arm.centerMode) ? arm.centerMode : 'doubleYellow';
   const waitingArea = WAITING_AREA_TYPES.has(arm.waitingArea) ? arm.waitingArea : 'none';
+  const explicitRightTurnLane = typeof arm.rightTurnLane === 'boolean';
+  const rightTurnLanes = explicitRightTurnLane
+    ? (arm.rightTurnLane ? clamp(Math.round(finite(arm.rightTurnLanes, 1)), 1, 2) : 0)
+    : clamp(Math.round(finite(arm.rightTurnLanes, 1)), 0, 2);
+  const rightTurnIsland = RIGHT_ISLAND_TYPES.has(arm.rightTurnIsland) ? arm.rightTurnIsland : 'hatched';
   return {
     angle: normalizeAngle(arm.angle),
     laneIn: clamp(Math.round(finite(arm.laneIn, 2)), 0, 6),
@@ -51,7 +57,9 @@ export function sanitizeArm(arm = {}) {
     medianWidth: Math.round(clamp(finite(arm.medianWidth, 1), 0, 4) * 10) / 10,
     waitingArea,
     leftTurnLanes: clamp(Math.round(finite(arm.leftTurnLanes, 1)), 1, 2),
-    rightTurnLanes: clamp(Math.round(finite(arm.rightTurnLanes, 1)), 0, 2),
+    rightTurnLanes,
+    rightTurnLane: rightTurnLanes > 0,
+    rightTurnIsland,
     leftGuardrail: Boolean(arm.leftGuardrail),
     rightGuardrail: Boolean(arm.rightGuardrail),
   };
