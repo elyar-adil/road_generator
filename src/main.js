@@ -372,14 +372,6 @@ function rightTurnPathData(fromG,toG,type,laneCount){
   const turnEnd=path.length-1;
   for(let index=1;index<=6;index++) path.push(lerp2(targetNear,targetAnchor,index/6));
   const offsets=variableOffsetPath(path,bundleWidth/2,0);
-  const entryDivider=[
-    fromG.wp(splitU,fromG.outOuterS+bundleWidth),
-    fromG.wp(turnU,fromG.outOuterS+bundleWidth),
-  ];
-  const mergeDivider=[
-    toG.wp(turnU,toG.inOuterS-bundleWidth),
-    toG.wp(targetMergeU,toG.inOuterS-bundleWidth),
-  ];
   const guideInner=offsets.right.slice(sourceTaperEnd,turnEnd+1);
   const guideApex=lineIntersect(
     guideInner[0],add(guideInner[0],scl(fromG.fwd,-1)),
@@ -389,8 +381,8 @@ function rightTurnPathData(fromG,toG,type,laneCount){
     type,path,offsets,lanePaths:offsetLanePaths(path,laneCount,laneW),
     sourceAnchor,targetAnchor,sourceTaperEnd,turnEnd,
     outerBoundary:offsets.left,innerBoundary:offsets.right,
-    entryDivider,mergeDivider,guideInner,guideApex,
-    splitU,targetMergeU,bundleWidth,
+    guideInner,guideApex,
+    splitU,turnU,targetMergeU,bundleWidth,
   };
 }
 
@@ -447,13 +439,17 @@ function addRightTurnFacility(fromG,facility){
     return;
   }
 
-  const {offsets,innerBoundary,sourceTaperEnd,turnEnd,entryDivider,mergeDivider}=data;
+  const {offsets,innerBoundary,sourceTaperEnd,turnEnd,splitU,turnU,targetMergeU,bundleWidth}=data;
+  const toG=facility.target;
   const surface=buildFlatPoly(offsets.left.concat(offsets.right.slice().reverse()),[],0.082,COLORS.asphalt,{rough:0.95});
   if(surface) worldGroup.add(surface);
   for(let lane=1;lane<data.lanePaths.length;lane++) addDashedPath(averagePaths(data.lanePaths[lane-1],data.lanePaths[lane]));
-  addRoadDashedPath(entryDivider);
+  // Entry/merge dividers sit on the same lateral line as the main carriageway's
+  // outermost lane divider, so they must share its dash cadence and phase to
+  // read as a seamless continuation rather than a second, offset pattern.
+  addArmDashes(fromG,turnU,splitU,fromG.outOuterS+bundleWidth);
   addSolidPath(innerBoundary.slice(sourceTaperEnd,turnEnd+1));
-  addRoadDashedPath(mergeDivider);
+  addArmDashes(toG,turnU,targetMergeU,toG.inOuterS-bundleWidth);
   addRightTurnGuideArea(fromG,data);
   if(state.showArrows){
     data.lanePaths.forEach(lanePath=>worldGroup.add(buildArrowMeshOnPath(lanePath.slice(3),['right'])));
@@ -673,6 +669,26 @@ const WAITING_DASH = 1.0;
 const WAITING_GAP = 1.0;
 const WAITING_SURFACE = 0x343941;
 
+// Longitudinal lane-divider dashes on the main carriageway.  Anything that
+// must read as a continuation of these markings (right-turn branch dividers,
+// future merge/split lane separators) has to share both the cadence and the
+// phase anchor so dashes line up seamlessly across the joint.
+const ROAD_DASH_LEN = 2.6;
+const ROAD_DASH_GAP = 2.2;
+const ROAD_LINE_WIDTH = 0.15;
+const ROAD_LINE_YBOTTOM = 0.09;
+
+// Phase anchor for the main carriageway's longitudinal dashes: the first dash
+// leading edge sits just past the stop line.  Keeping this in one place means
+// branch/merge markings can re-derive the same phase on any arm.
+function laneLineStartFor(g){
+  const crosswalkStart=g.R+0.7;
+  const crosswalkEnd=Math.min(g.R+4.2,state.armLength-1.8);
+  const hasCrosswalkSpace=crosswalkEnd-crosswalkStart>1.2;
+  const stopU=hasCrosswalkSpace ? crosswalkEnd+0.45 : g.R+0.45;
+  return stopU+0.5/2+0.05;
+}
+
 function addDashedPath(path){
   buildDashedSegments(path,WAITING_DASH,WAITING_GAP).forEach(([p0,p1])=>{
     const segment = boxAlong(p0,p1,{
@@ -693,14 +709,43 @@ function addSolidPath(path,width=WAITING_LINE_WIDTH){
   }
 }
 
-function addRoadDashedPath(path){
-  buildDashedSegments(path,1.25,1.0).forEach(([p0,p1])=>{
+// Generic dashed polyline.  Defaults to the historical 1.25/1.0 cadence used
+// for short branch dividers, but accepts a custom cadence and a phase offset so
+// a connector can inherit the main carriageway's dash phase at the joint.
+function addRoadDashedPath(path,{dashLen=1.25,gapLen=1.0,phase=0,width=ROAD_LINE_WIDTH,yBottom=ROAD_LINE_YBOTTOM}={}){
+  buildDashedSegments(path,dashLen,gapLen,phase).forEach(([p0,p1])=>{
     const segment=boxAlong(p0,p1,{
-      lateral:0,width:0.15,height:0.008,yBottom:0.09,
+      lateral:0,width,height:0.008,yBottom,
       color:COLORS.white,rough:0.6,extend:0,
     });
     if(segment) worldGroup.add(segment);
   });
+}
+
+// Dashed divider running parallel to an arm between two longitudinal stations
+// at a fixed lateral offset.  Iterating in u-space (not path-distance) and
+// anchoring on `laneLineStartFor(g)` reproduces the main carriageway's dash
+// grid exactly, so the segment is a seamless continuation of drawLaneLines.
+// This is the shared primitive for any arm-parallel split/merge separator.
+function addArmDashes(g,uFrom,uTo,s,{dashLen=ROAD_DASH_LEN,gapLen=ROAD_DASH_GAP,width=ROAD_LINE_WIDTH,yBottom=ROAD_LINE_YBOTTOM}={}){
+  const u0=Math.min(uFrom,uTo), u1=Math.max(uFrom,uTo);
+  if(u1-u0<1e-4) return;
+  const period=dashLen+gapLen;
+  const anchor=laneLineStartFor(g);
+  const mStart=Math.floor((u0-anchor-dashLen)/period)+1;
+  for(let m=mStart; ; m++){
+    const start=anchor+m*period;
+    if(start>u1) break;
+    const end=start+dashLen;
+    if(end<=u0) continue;
+    const a=Math.max(start,u0), b=Math.min(end,u1);
+    if(b-a<=1e-4) continue;
+    const segment=boxAlong(g.wp(a,s),g.wp(b,s),{
+      lateral:0,width,height:0.008,yBottom,
+      color:COLORS.white,rough:0.6,extend:0,
+    });
+    if(segment) worldGroup.add(segment);
+  }
 }
 
 function roundedGuideCorner(previous,corner,next,radius,segments=4){
@@ -750,31 +795,96 @@ function addRightTurnGuideArea(fromG,data){
         });
     if(edge) worldGroup.add(edge);
   }
-  if(!planted){
-    for(let index=1;index<6;index++){
-      const t=index/6;
-      const innerIndex=Math.round((guideInner.length-1)*t);
-      const guidePoint=guideInner[innerIndex];
-      const previousPoint=guideInner[Math.max(0,innerIndex-1)];
-      const nextPoint=guideInner[Math.min(guideInner.length-1,innerIndex+1)];
-      const guideTangent=sub(nextPoint,previousPoint);
-      const tangentLength=len(guideTangent)||1;
-      const tangent=scl(guideTangent,1/tangentLength);
-      const baseCenter=lerp2(guidePoint,guideApex,0.2);
-      const tip=lerp2(guidePoint,guideApex,0.48);
-      const legHalfWidth=Math.min(0.9,len(sub(guidePoint,guideApex))*0.17);
-      const firstBase=add(baseCenter,scl(tangent,-legHalfWidth));
-      const secondBase=add(baseCenter,scl(tangent,legHalfWidth));
-      const firstLeg=boxAlong(firstBase,tip,{
-        lateral:0,width:0.13,height:0.008,yBottom:0.096,color:COLORS.white,rough:0.6,extend:0,
+  if(!planted) addGuideChevrons(guideInner,guideApex,guidePoints);
+}
+
+// Guidance-area chevrons. Each V's tip points along the traffic flow of the
+// adjacent lane (GB 5768.3 guidance-line rule). The two leg ends land exactly
+// on the two boundary edges of the guide area - the inner curved edge and the
+// outer boundary (rounded, as drawn) - so the marking follows the actual
+// wedge instead of a fixed-size silhouette. Legs are drawn at a constant 45°
+// to the flow direction, giving every V the same 90° tip angle wherever the
+// wedge is wide or narrow - a congruent pattern that looks uniformly dense
+// instead of flat in the middle and acute at the tips.
+function addGuideChevrons(guideInner,guideApex,guidePoints){
+  if(guideInner.length<3 || !guidePoints || guidePoints.length<3) return;
+  const lineWidth=0.35;
+  const total=polylineLength(guideInner);
+  let distance=0;
+  while(distance<total-0.3){
+    const pose=pointAndTangentAtDistance(guideInner,distance);
+    if(!pose) break;
+    const guidePoint=pose.point;
+    const tangent=pose.tangent;
+    let across=v2(-tangent.y,tangent.x);
+    if(across.x*(guideApex.x-guidePoint.x)+across.y*(guideApex.y-guidePoint.y)<0) across=scl(across,-1);
+    const outerPoint=rayBoundaryIntersect(guidePoint,across,guidePoints,true);
+    const width=outerPoint?len(sub(outerPoint,guidePoint)):0;
+    let forward=Math.min(width*0.5,Math.max(0.35,total-0.3-distance));
+    if(width>=lineWidth*2){
+      const midpoint=lerp2(guidePoint,outerPoint,0.5);
+      let tip=add(midpoint,scl(tangent,forward));
+      const legsInside=end=>{
+        for(let i=1;i<12;i++) if(!pointInRing(lerp2(tip,end,i/12),guidePoints)) return false;
+        return true;
+      };
+      while(forward>0.4&&(!pointInRing(tip,guidePoints)||!legsInside(guidePoint)||!legsInside(outerPoint))){
+        forward=Math.max(0.35,forward-0.25);
+        tip=add(midpoint,scl(tangent,forward));
+      }
+      const firstLeg=boxAlong(tip,guidePoint,{
+        lateral:0,width:lineWidth,height:0.008,yBottom:0.096,color:COLORS.white,rough:0.6,extend:0,
       });
-      const secondLeg=boxAlong(secondBase,tip,{
-        lateral:0,width:0.13,height:0.008,yBottom:0.096,color:COLORS.white,rough:0.6,extend:0,
+      const secondLeg=boxAlong(tip,outerPoint,{
+        lateral:0,width:lineWidth,height:0.008,yBottom:0.096,color:COLORS.white,rough:0.6,extend:0,
       });
       if(firstLeg) worldGroup.add(firstLeg);
       if(secondLeg) worldGroup.add(secondLeg);
     }
+    distance+=lineWidth+forward;
   }
+}
+
+// First intersection of a ray (point + unit direction) with a boundary
+// polyline; falls back to the nearest boundary point when the ray misses.
+// With `closed` the boundary is treated as a ring (last point wraps to first).
+function rayBoundaryIntersect(point,direction,boundary,closed=false){
+  let best=null,bestDistance=Infinity;
+  const count=boundary.length-(closed?0:1);
+  for(let i=0;i<count;i++){
+    const a=boundary[i], b=boundary[(i+1)%boundary.length];
+    const ab=sub(b,a);
+    const denom=direction.x*ab.y-direction.y*ab.x;
+    if(Math.abs(denom)<1e-9) continue;
+    const t=((a.x-point.x)*ab.y-(a.y-point.y)*ab.x)/denom;
+    const u=((a.x-point.x)*direction.y-(a.y-point.y)*direction.x)/denom;
+    if(t>1e-3 && u>=-1e-4 && u<=1+1e-4 && t<bestDistance){
+      bestDistance=t;
+      best=add(point,scl(direction,t));
+    }
+  }
+  if(best) return best;
+  let nearest=null,nearestDistance=Infinity;
+  for(let i=0;i<count;i++){
+    const a=boundary[i], b=boundary[(i+1)%boundary.length];
+    const ab=sub(b,a);
+    const abLength=len(ab)||1;
+    const u=Math.min(1,Math.max(0,((point.x-a.x)*ab.x+(point.y-a.y)*ab.y)/(abLength*abLength)));
+    const candidate=add(a,scl(ab,u));
+    const distance=len(sub(candidate,point));
+    if(distance<nearestDistance){nearestDistance=distance;nearest=candidate;}
+  }
+  return nearest;
+}
+
+function pointInRing(point,ring){
+  let inside=false;
+  for(let i=0,j=ring.length-1;i<ring.length;j=i++){
+    const xi=ring[i].x,yi=ring[i].y,xj=ring[j].x,yj=ring[j].y;
+    const intersect=((yi>point.y)!==(yj>point.y))&&(point.x<(xj-xi)*(point.y-yi)/(yj-yi)+xi);
+    if(intersect) inside=!inside;
+  }
+  return inside;
 }
 
 function buildArrowMeshOnPath(path,types){
@@ -1059,7 +1169,7 @@ function regenerate(){
     const stopLineWidth=0.5;
     // Longitudinal lane markings must end before the stop line instead of
     // continuing through it and across the pedestrian crossing.
-    const laneLineStart=stopU+stopLineWidth/2+0.05;
+    const laneLineStart=laneLineStartFor(g);
     const facilityStart=stopU+0.5;
     // pavement
     const pav = buildQuad(g.nearLeft, g.farLeft, g.farRight, g.nearRight, 0.01, COLORS.asphalt, 0.95);
@@ -1084,13 +1194,12 @@ function regenerate(){
       for(let k=1;k<count;k++){
         const s = sign*(g.medW/2 + k*g.laneW);
         // dashed
-        const dashLen=2.6, gapLen=2.2;
         let u=laneLineStart;
         while(u<state.armLength-1){
-          const u2=Math.min(u+dashLen,state.armLength-1);
+          const u2=Math.min(u+ROAD_DASH_LEN,state.armLength-1);
           const seg = boxAlong(g.wp(u,s), g.wp(u2,s), {lateral:0,width:0.12,height:0.008,yBottom:0.015,color:COLORS.white,rough:0.6,extend:0});
           if(seg) worldGroup.add(seg);
-          u += dashLen+gapLen;
+          u += ROAD_DASH_LEN+ROAD_DASH_GAP;
         }
       }
       if(count>0){

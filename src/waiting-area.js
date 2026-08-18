@@ -43,13 +43,27 @@ export function pointAndTangentAtDistance(path, wantedDistance){
   return {point:path[path.length-1],tangent:normalize(sub(path.at(-1),path.at(-2)))};
 }
 
-export function buildDashedSegments(path,dashLength=1,gapLength=1){
+// Dashes are laid out along the path as if the pattern originated at an
+// abstract origin and continues with a fixed cadence.  `phaseOffset` shifts
+// that origin backwards along the path so the first dash leading edge is at
+// `phaseOffset` from the path start; this lets a connector inherit the phase
+// of another marking (e.g. the main carriageway's lane divider) at the joint,
+// so dashes line up seamlessly across the two.
+export function buildDashedSegments(path,dashLength=1,gapLength=1,phaseOffset=0){
   const total=polylineLength(path);
+  if(total<=EPSILON) return [];
+  const period=dashLength+gapLength;
+  // Leading edges of the dash pattern live at phaseOffset + m*period for
+  // integer m.  Find the first m whose dash can overlap [0, total].
+  const mStart=Math.floor((-dashLength-phaseOffset)/period)+1;
   const segments=[];
-  for(let start=0;start<total-EPSILON;start+=dashLength+gapLength){
-    const end=Math.min(start+dashLength,total);
-    const a=pointAndTangentAtDistance(path,start)?.point;
-    const b=pointAndTangentAtDistance(path,end)?.point;
+  for(let m=mStart; ; m++){
+    const start=phaseOffset+m*period;
+    if(start>=total-EPSILON) break;
+    const end=start+dashLength;
+    if(end<=0) continue;
+    const a=pointAndTangentAtDistance(path,Math.max(0,start))?.point;
+    const b=pointAndTangentAtDistance(path,Math.min(end,total))?.point;
     if(a&&b&&distance(a,b)>EPSILON) segments.push([a,b]);
   }
   return segments;

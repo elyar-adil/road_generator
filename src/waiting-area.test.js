@@ -64,6 +64,21 @@ describe('waiting-area geometry',()=>{
     expect(dashes[0]).toEqual([{x:0,y:0},{x:1,y:0}]);
   });
 
+  it('honours a phase offset so dashes inherit a foreign cadence',()=>{
+    const path=[{x:0,y:0},{x:6,y:0}];
+    // Cadence dash=2 gap=2 -> period 4.  With no offset, leading edges at 0,4.
+    expect(buildDashedSegments(path,2,2)).toEqual([
+      [{x:0,y:0},{x:2,y:0}],
+      [{x:4,y:0},{x:6,y:0}],
+    ]);
+    // Shift the origin back by 1: leading edges at -1,3 -> only [3,5] fully
+    // inside, plus the partial [-1,1] clipped to [0,1].
+    expect(buildDashedSegments(path,2,2,-1)).toEqual([
+      [{x:0,y:0},{x:1,y:0}],
+      [{x:3,y:0},{x:5,y:0}],
+    ]);
+  });
+
   it('trims a path to an exact maximum length',()=>{
     const trimmed=trimPolyline([{x:0,y:0},{x:3,y:0},{x:3,y:4}],5);
     expect(polylineLength(trimmed)).toBeCloseTo(5,6);
