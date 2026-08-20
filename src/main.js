@@ -260,6 +260,19 @@ function buildFlatPoly(pts2D, holes, y, color, opts={}){
 }
 
 // ---------------------------------------------------------------- TOPOLOGY OVERLAY + SEGMENT DEMO
+const MOVEMENT_COLORS = { straight:0x4aa3ff, left:0x37d17a, right:0xff6b4a };
+const LANE_CENTERLINE_COLOR = 0xc3cad6;
+
+function disposeGroup(group){
+  group.traverse(obj=>{
+    if(obj.geometry) obj.geometry.dispose();
+    const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+    materials.filter(Boolean).forEach(material=>{
+      if(!Object.values(matCache).includes(material)) material.dispose();
+    });
+  });
+}
+
 function renderTopologyOverlay(geoms, facilities){
   disposeGroup(topologyGroup);
   topologyGroup.clear();
@@ -430,6 +443,7 @@ function regenerate(){
 // ---------------------------------------------------------------- ANIMATION LOOP (traffic light phase)
 const GREEN=4.2, YELLOW=1.0;
 let trafficTime = 0;
+const trafficLights = [];
 let lastFrame = performance.now();
 function animate(now=performance.now()){
   requestAnimationFrame(animate);
