@@ -585,11 +585,20 @@ export function deriveRoadScene(model, state, random = Math.random, topology = n
     const j = (i + 1) % n;
     const gi = geoms[i], gj = geoms[j];
     const rightFacility = rightFacilities[j];
-    const bypassesCorner = rightFacility
-      && rightFacility.type !== 'direct'
-      && rightFacility.target === gi;
+    const d = rightFacility && rightFacility.type !== 'direct' ? rightFacility.data : null;
+    const bypassesCorner = d && rightFacility.target === gi;
+    // When a channelized branch curves around this corner, the sidewalk must
+    // stay outside every carriageway: run along arm i's outer edge to the merge
+    // point, follow the branch's outer boundary (skipping its zero-width taper
+    // nose, which hugs the through lane), then back along arm j's outer edge.
     const path = bypassesCorner
-      ? [gi.farLeft, ...rightFacility.data.outerBoundary.slice().reverse(), gj.farRight]
+      ? [
+          gi.farLeft,
+          gi.wp(d.targetMergeU, gi.inOuterS),
+          ...d.outerBoundary.slice(d.sourceTaperEnd).reverse(),
+          gj.wp(d.splitU, gj.outOuterS),
+          gj.farRight,
+        ]
       : [gi.farLeft, gi.nearLeft, ...filletPts[i], gj.nearRight, gj.farRight];
     if (state.showSidewalk) scene.sidewalks.push({ path, width: state.sidewalkWidth, offset: 0.32 + state.sidewalkWidth / 2 });
     for (let k = 0; k < path.length - 1; k += 1) scene.curbs.push([path[k], path[k + 1]]);

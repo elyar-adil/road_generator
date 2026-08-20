@@ -37,6 +37,52 @@ describe('lane derivation layer', () => {
     }
   });
 
+  it('keeps every sidewalk band clear of every carriageway lane bundle', () => {
+    // Regression: the bypass sidewalk around a channelized right-turn branch
+    // used to run from the arm's far-left corner straight to the merge anchor,
+    // slicing across the outer through lane. Rebuild with split branches and
+    // assert the rendered sidewalk band (path + offset ± half width, matching
+    // pathStrip in render.js) never strictly overlaps any arm's lane rectangle.
+    const state = sanitizeProject({
+      ...createDefaultProject(),
+      arms: (createDefaultProject().arms || sanitizeProject({}).arms).map((a) => ({
+        ...a, rightTurnLane: true, rightTurnType: 'split', rightTurnMode: 'branch',
+      })),
+    });
+    const model = buildRoadModel(state);
+    const topology = computeLaneTopology(model.geoms, {
+      armLength: state.armLength,
+      facilities: model.rightFacilities,
+    });
+    const random = createSeededRandom(state.scenerySeed);
+    const s = deriveRoadScene(model, state, random, topology);
+
+    const inRect = (p, g) => {
+      const u = p.x * g.fwd.x + p.y * g.fwd.y;
+      const st = p.x * g.left.x + p.y * g.left.y;
+      return u > 0 && u < state.armLength && st > g.outOuterS + 1e-6 && st < g.inOuterS - 1e-6;
+    };
+    const bandEdges = (path, width, offset) => {
+      const outer = [], inner = [];
+      for (let i = 0; i < path.length; i += 1) {
+        const p = path[i], prev = path[Math.max(0, i - 1)], next = path[Math.min(path.length - 1, i + 1)];
+        const tx = next.x - prev.x, ty = next.y - prev.y, L = Math.hypot(tx, ty) || 1;
+        const nx = ty / L, ny = -tx / L;
+        outer.push({ x: p.x + nx * (offset + width / 2), y: p.y + ny * (offset + width / 2) });
+        inner.push({ x: p.x + nx * (offset - width / 2), y: p.y + ny * (offset - width / 2) });
+      }
+      return [outer, inner];
+    };
+    for (const sw of s.sidewalks) {
+      for (const edge of bandEdges(sw.path, sw.width, sw.offset)) {
+        for (let i = 0; i < edge.length - 1; i += 1) {
+          const mid = { x: (edge[i].x + edge[i + 1].x) / 2, y: (edge[i].y + edge[i + 1].y) / 2 };
+          model.geoms.forEach((g) => expect(inRect(mid, g)).toBe(false));
+        }
+      }
+    }
+  });
+
   it('keeps all derived points finite', () => {
     const s = scene({ armLength: 46 });
     const all = [
