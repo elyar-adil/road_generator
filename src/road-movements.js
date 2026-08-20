@@ -78,13 +78,26 @@ export function rightTurnCapacity(arm, target){
 //   arm:        the arm config (laneIn, waitingArea, leftTurnLanes, rightTurn*)
 //   available:  Set of reachable movement types (straight/left/right)
 //   leftTarget,rightTarget: the geoms reached by left/right movements (may be null)
+//
+// The channelized right-turn is modelled two ways (per approach), and both
+// derive the guide area around the lane they create:
+//   rightTurnMode 'dedicated' (方案1): the outermost inbound lane IS the
+//     dedicated right-turn lane (arrow = right); the guide triangle sits between
+//     it and the adjacent through lane.
+//   rightTurnMode 'branch' (方案2): the outer lane stays through and a separate
+//     branch lane derives; the guide triangle is between that through lane and
+//     the branch.
 export function armLaneMovementSets(arm, available, leftTarget, rightTarget){
   const dedicatedLeftLanes = arm.waitingArea==='left'
     ? leftTurnCapacity(arm, leftTarget)
     : 0;
   const rightCount = rightTurnCapacity(arm, rightTarget);
-  const dedicatedRight = rightCount>0
-    ? (arm.rightTurnType==='direct' ? rightCount : true)
-    : 0;
+  const mode = arm.rightTurnMode === 'dedicated' ? 'dedicated' : 'branch';
+  let dedicatedRight = 0;
+  if (rightCount > 0) {
+    if (arm.rightTurnType === 'direct') dedicatedRight = rightCount;
+    else if (mode === 'dedicated') dedicatedRight = rightCount;   // scheme 1: outer lane turns right
+    else dedicatedRight = true;                                   // scheme 2: branch splits off
+  }
   return laneMovementSets(arm.laneIn, available, dedicatedLeftLanes, dedicatedRight);
 }

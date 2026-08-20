@@ -8,6 +8,7 @@ import {
   normaliseArmValue,
   parseProjectDocument,
   RIGHT_ISLAND_TYPES,
+  RIGHT_TURN_MODES,
   RIGHT_TURN_TYPES,
   sampleIntersectionSize,
   sanitizeArm,
@@ -1686,6 +1687,10 @@ function renderArmsList(){
           '<option value="1"'+(arm.rightTurnLanes===1?' selected':'')+'>1 条</option>'+
           '<option value="2"'+(arm.rightTurnLanes===2?' selected':'')+(arm.laneIn<2?' disabled':'')+'>2 条</option>'+
         '</select></div>'+
+        '<div class="right-turn-options"'+(arm.rightTurnLane&&arm.rightTurnType!=='direct'?'':' hidden')+'><label>车道方案</label><select data-f="rightTurnMode">'+
+          '<option value="branch"'+(arm.rightTurnMode!=='dedicated'?' selected':'')+'>方案2：主线直行 + 独立右转分支</option>'+
+          '<option value="dedicated"'+(arm.rightTurnMode==='dedicated'?' selected':'')+'>方案1：最外侧车道为右转专用道</option>'+
+        '</select></div>'+
         '<div class="right-turn-island"'+(arm.rightTurnLane&&arm.rightTurnType!=='direct'?'':' hidden')+'><label>三角区域</label><select data-f="rightTurnIsland">'+
           '<option value="planted"'+(arm.rightTurnIsland==='planted'?' selected':'')+'>绿化带</option>'+
           '<option value="hatched"'+(arm.rightTurnIsland==='hatched'?' selected':'')+'>导流线区</option>'+
@@ -1781,6 +1786,12 @@ function renderArmsList(){
 
     row.querySelector('[data-f=rightTurnIsland]').addEventListener('change',event=>{
       arm.rightTurnIsland=RIGHT_ISLAND_TYPES.has(event.target.value)?event.target.value:'planted';
+      regenerate();
+    });
+
+    row.querySelector('[data-f=rightTurnMode]').addEventListener('change',event=>{
+      arm.rightTurnMode=RIGHT_TURN_MODES.has(event.target.value)?event.target.value:'branch';
+      renderArmsList();
       regenerate();
     });
 

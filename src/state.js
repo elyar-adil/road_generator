@@ -7,12 +7,13 @@ export const CENTER_MODES = new Set(['planted', 'doubleYellowRail', 'doubleYello
 export const WAITING_AREA_TYPES = new Set(['none', 'left', 'straight']);
 export const RIGHT_ISLAND_TYPES = new Set(['planted', 'hatched']);
 export const RIGHT_TURN_TYPES = new Set(['none', 'direct', 'split', 'slip']);
+export const RIGHT_TURN_MODES = new Set(['dedicated', 'branch']);
 
 const DEFAULT_ARMS = [
-  { angle: 0, laneIn: 2, laneOut: 2, centerMode: 'planted', medianWidth: 1.2, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, rightTurnLane: true, rightTurnIsland: 'planted', leftGuardrail: false, rightGuardrail: false },
-  { angle: 90, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, rightTurnLane: true, rightTurnIsland: 'planted', leftGuardrail: false, rightGuardrail: true },
-  { angle: 180, laneIn: 3, laneOut: 2, centerMode: 'doubleYellowRail', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, rightTurnLane: true, rightTurnIsland: 'hatched', leftGuardrail: false, rightGuardrail: false },
-  { angle: 270, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, rightTurnLane: true, rightTurnIsland: 'hatched', leftGuardrail: true, rightGuardrail: false },
+  { angle: 0, laneIn: 2, laneOut: 2, centerMode: 'planted', medianWidth: 1.2, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, rightTurnLane: true, rightTurnIsland: 'planted', rightTurnMode: 'branch', leftGuardrail: false, rightGuardrail: false },
+  { angle: 90, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, rightTurnLane: true, rightTurnIsland: 'planted', rightTurnMode: 'branch', leftGuardrail: false, rightGuardrail: true },
+  { angle: 180, laneIn: 3, laneOut: 2, centerMode: 'doubleYellowRail', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, rightTurnLane: true, rightTurnIsland: 'hatched', rightTurnMode: 'branch', leftGuardrail: false, rightGuardrail: false },
+  { angle: 270, laneIn: 2, laneOut: 2, centerMode: 'doubleYellow', medianWidth: 1, waitingArea: 'none', leftTurnLanes: 1, rightTurnLanes: 1, rightTurnLane: true, rightTurnIsland: 'hatched', rightTurnMode: 'branch', leftGuardrail: true, rightGuardrail: false },
 ];
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -65,6 +66,7 @@ export function sanitizeArm(arm = {}) {
     ? 0
     : clamp(Math.round(finite(arm.rightTurnLanes, 1)), 1, 2);
   const rightTurnIsland = RIGHT_ISLAND_TYPES.has(arm.rightTurnIsland) ? arm.rightTurnIsland : 'hatched';
+  const rightTurnMode = RIGHT_TURN_MODES.has(arm.rightTurnMode) ? arm.rightTurnMode : 'branch';
   return {
     angle: normalizeAngle(arm.angle),
     laneIn: clamp(Math.round(finite(arm.laneIn, 2)), 0, 6),
@@ -77,6 +79,7 @@ export function sanitizeArm(arm = {}) {
     rightTurnLane: rightTurnType !== 'none',
     rightTurnType,
     rightTurnIsland,
+    rightTurnMode,
     leftGuardrail: Boolean(arm.leftGuardrail),
     rightGuardrail: Boolean(arm.rightGuardrail),
   };

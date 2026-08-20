@@ -1,5 +1,5 @@
 import { describe,expect,it } from 'vitest';
-import { classifyArmMovement,laneMovementSets } from './road-movements.js';
+import { classifyArmMovement,laneMovementSets,armLaneMovementSets } from './road-movements.js';
 
 describe('road movement orientation',()=>{
   it('classifies the visually left target as left on the X/Z planning plane',()=>{
@@ -24,12 +24,32 @@ describe('road movement orientation',()=>{
     expect([...lanes[2]]).toEqual(['straight']);
   });
 
-  it('reserves the existing outer lanes for a direct multi-lane right turn',()=>{
+it('reserves the existing outer lanes for a direct multi-lane right turn',()=>{
     const lanes=laneMovementSets(4,new Set(['left','straight','right']),1,2);
     expect([...lanes[0]]).toEqual(['left']);
     expect([...lanes[1]]).toEqual(['straight']);
     expect([...lanes[2]]).toEqual(['right']);
     expect([...lanes[3]]).toEqual(['right']);
+  });
+
+  it('scheme 1 (dedicated) turns the outermost lane right with the guide triangle beside it',()=>{
+    const arm={ laneIn:3, laneOut:2, waitingArea:'none', leftTurnLanes:1,
+      rightTurnLane:true, rightTurnType:'split', rightTurnLanes:1, rightTurnMode:'dedicated' };
+    const lanes=armLaneMovementSets(arm,new Set(['left','straight','right']),null,{arm:{laneOut:2}});
+    expect(lanes[0].has('left')).toBe(true);
+    expect(lanes[1].has('straight')).toBe(true);
+    expect(lanes[2].has('right')).toBe(true);           // outermost lane = right
+    expect(lanes[2].has('straight')).toBe(false);
+  });
+
+  it('scheme 2 (branch) keeps the outermost lane straight and lets the branch turn right',()=>{
+    const arm={ laneIn:3, laneOut:2, waitingArea:'none', leftTurnLanes:1,
+      rightTurnLane:true, rightTurnType:'split', rightTurnLanes:1, rightTurnMode:'branch' };
+    const lanes=armLaneMovementSets(arm,new Set(['left','straight','right']),null,{arm:{laneOut:2}});
+    expect(lanes[0].has('left')).toBe(true);
+    expect(lanes[1].has('straight')).toBe(true);
+    expect(lanes[2].has('straight')).toBe(true);        // outer lane stays straight
+    expect(lanes[2].has('right')).toBe(false);
   });
 
   it('falls back to the normal movement set when no right target exists',()=>{

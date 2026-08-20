@@ -7,7 +7,7 @@ import {
 } from './lane-topology.js';
 import { createSeededRandom } from './state.js';
 
-function fakeGeom(angleDeg, laneIn, laneOut, wait = 'none', right = { type: 'none' }, leftTurnLanes = 1) {
+function fakeGeom(angleDeg, laneIn, laneOut, wait = 'none', right = { type: 'none' }, leftTurnLanes = 1, rightTurnMode = 'branch') {
   const a = angleDeg * Math.PI / 180;
   const fwd = { x: Math.cos(a), y: Math.sin(a) };
   const left = { x: -Math.sin(a), y: Math.cos(a) };
@@ -17,7 +17,7 @@ function fakeGeom(angleDeg, laneIn, laneOut, wait = 'none', right = { type: 'non
   const inOuterS = medW / 2 + laneOut * laneW;
   const outOuterS = -(medW / 2 + laneIn * laneW);
   return {
-    arm: { angle: angleDeg, laneIn, laneOut, waitingArea: wait, leftTurnLanes, rightTurnLane: right.type !== 'none', rightTurnType: right.type, rightTurnLanes: 1 },
+    arm: { angle: angleDeg, laneIn, laneOut, waitingArea: wait, leftTurnLanes, rightTurnLane: right.type !== 'none', rightTurnType: right.type, rightTurnLanes: 1, rightTurnMode },
     fwd, left, laneW, medW, R, inOuterS, outOuterS,
     wp: (u, s) => ({ x: fwd.x * u + left.x * s, y: fwd.y * u + left.y * s }),
   };
@@ -132,5 +132,44 @@ describe('lane topology graph', () => {
     // Through lanes keep a full straight centreline from the junction.
     const through = inLanes.find((cl) => cl.index === 0);
     expect(through.path[0].x).toBeCloseTo(18.5, 6); // nearU = R(18)+0.5
+  });
+
+  it('scheme 1 (dedicated) adds a right connection for the outermost lane', () => {
+    const geoms = [
+      fakeGeom(0, 3, 2, 'none', { type: 'split' }, 1, 'dedicated'),
+      fakeGeom(90, 2, 2),
+      fakeGeom(180, 2, 2),
+      fakeGeom(270, 2, 2),
+    ];
+    const branch = Array.from({ length: 12 }, (_, k) => ({ x: 32 - k * 2, y: -6 - k * 0.6 }));
+    const facilities = [
+      { type: 'split', laneCount: 1, data: { lanePaths: [branch], targetMergeU: 30 } },
+      null, null, null,
+    ];
+    const { connections } = computeLaneTopology(geoms, { facilities });
+    // Scheme 1: the outermost inbound lane is a right-turn lane, so it gets a
+    // right movement connection; scheme 2 (test above) gives it none.
+    const rightConn = connections.filter((c) => c.movement === 'right' && c.fromArm === 0);
+    expect(rightConn.some((c) => c.fromIndex === 2)).toBe(true);
+  });
+
+  it('scheme 2 (branch) keeps the outermost lane straight, so no right connection', () => {
+    const geoms = [
+      fakeGeom(0, 3, 2, 'none', { type: 'split' }, 1, 'branch'),
+      fakeGeom(90, 2, 2),
+      fakeGeom(180, 2, 2),
+      fakeGeom(270, 2, 2),
+    ];
+    const branch = Array.from({ length: 12 }, (_, k) => ({ x: 32 - k * 2, y: -6 - k * 0.6 }));
+    const facilities = [
+      { type: 'split', laneCount: 1, data: { lanePaths: [branch], targetMergeU: 30 } },
+      null, null, null,
+    ];
+    const { connections } = computeLaneTopology(geoms, { facilities });
+    const rightConn = connections.filter((c) => c.movement === 'right' && c.fromArm === 0);
+    expect(rightConn).toHaveLength(0);
+    // The outer lane is a straight lane, so it keeps a straight connection.
+    const straightConn = connections.filter((c) => c.movement === 'straight' && c.fromArm === 0);
+    expect(straightConn.some((c) => c.fromIndex === 2)).toBe(true);
   });
 });
