@@ -101,8 +101,8 @@ export function armMovementTargets(geoms) {
 //   arms:            the input geoms (tagged with armIndex)
 //   lanes:           distinct lane endpoints (id, armIndex, side, index, point)
 //   laneCenterlines: per-lane centreline polylines running along the full arm;
-//                    `skip` marks dedicated right-turn branches whose centreline
-//                    is drawn as the curved branch itself
+//                    side is 'in' | 'out' | 'branch' (scheme-2 branch lanes
+//                    that split off the outer through lane)
 //   connections:     array of { fromId, toId, fromArm, toArm, fromIndex, toIndex,
 //                               movement, turn, path }
 export function computeLaneTopology(geoms, { armLength = 46, facilities = [] } = {}) {
@@ -110,15 +110,19 @@ export function computeLaneTopology(geoms, { armLength = 46, facilities = [] } =
   const connections = [];
   const laneIds = new Map(); // armIndex|side|index -> lane id
 
+  // Single source of truth for every lane's assigned movement: centreline
+  // assignment (below) and connection edges must agree with the arrows.
+  const movementSetsByArm = geoms.map((fromG, i) => {
+    const has = new Set();
+    ['left', 'straight', 'right'].forEach((m) => { if (targets[i][m]) has.add(m); });
+    return armLaneMovementSets(fromG.arm, has, targets[i].left, targets[i].right);
+  });
+
   geoms.forEach((fromG, i) => {
     const arm = fromG.arm;
     const { laneIn, laneOut } = arm;
     if (laneIn <= 0) return;
-    const has = new Set();
-    ['left', 'straight', 'right'].forEach((m) => { if (targets[i][m]) has.add(m); });
-    const avail = new Set(has);
-    const leftTarget = targets[i].left, rightTarget = targets[i].right;
-    const movementSets = armLaneMovementSets(arm, avail, leftTarget, rightTarget);
+    const movementSets = movementSetsByArm[i];
     const byMovement = laneIndicesByMovement(movementSets);
 
     const inboundCentre = (index) => -(fromG.medW / 2 + (index + 0.5) * fromG.laneW);
@@ -147,10 +151,8 @@ export function computeLaneTopology(geoms, { armLength = 46, facilities = [] } =
       });
     });
 
-    // Dedicated right-turn branch lanes (split/slip) are handled in the
-    // centreline pass below: their centreline is a single contiguous polyline
-    // from the arm root through the curved branch to the merge, so it never
-    // floats mid-air nor crosses the guide triangle.
+    // Channelized right-turn branch lanes (split/slip) are handled in the
+    // centreline pass below, driven by each lane's movement assignment.
   });
 
   // Collect all distinct lane endpoints with their lateral station and point.
@@ -174,14 +176,17 @@ export function computeLaneTopology(geoms, { armLength = 46, facilities = [] } =
     addSide('out', arm.laneOut, (index) => g.medW / 2 + (index + 0.5) * g.laneW);
   });
 
-  // Guide-aware lane centreline polylines. Every travel lane that is a
-// continuous, un-interrupted carriageway gets a straight centreline along the
-// full arm. Lanes involved in a diverge/merge derive their centreline from the
-// real branch geometry instead, so no centreline ever crosses a guide triangle:
-//   - a dedicated right-turn branch lane is one contiguous polyline from the arm
-//     root, through the curved branch, to the merge;
-//   - the receiving outbound lane on the merge target is truncated to start
-//     downstream of the merge nose (the merge triangle sits before it).
+  // Movement-aware lane centreline polylines. Every travel lane gets a
+  // centreline that matches what that lane actually is, driven by the same
+  // lane->movement assignment the arrows use (never by lane position alone):
+  //   - a dedicated right-turn lane (scheme 1) is one contiguous polyline from
+  //     the arm root, through the curved branch, to the merge;
+  //   - every other inbound lane (straight/left, including the outer through
+  //     lane in scheme 2) keeps a straight centreline along the full arm;
+  //   - a scheme-2 branch is its own lane with its own centreline, from the
+  //     split point through the curve to the merge;
+  //   - the receiving outbound lane on the merge target is truncated to start
+  //     downstream of the merge nose (the merge triangle sits before it).
   const laneCenterlines = [];
   const nearU = (g) => g.R + 0.5;
   const longitudinalStep = (g) => Math.max(1, (armLength - nearU(g)) / (armLength <= 60 ? 16 : 28));
@@ -239,17 +244,19 @@ export function computeLaneTopology(geoms, { armLength = 46, facilities = [] } =
 
   geoms.forEach((g, i) => {
     const arm = g.arm;
-    // Inbound lanes.
+    const facility = facilities && facilities[i];
+    const branchFacility = facility && facility.type !== 'direct' && facility.data && facility.data.lanePaths
+      ? facility
+      : null;
+    const laneSets = movementSetsByArm[i];
+    // Inbound lanes: a centreline is grafted onto the branch only for lanes the
+    // movement assignment marks as dedicated right-turn lanes (scheme 1).
     for (let index = 0; index < arm.laneIn; index += 1) {
       const s = -(g.medW / 2 + (index + 0.5) * g.laneW);
       let path = armPath(g, s);
-      const facility = facilities && facilities[i];
-      if (facility && facility.type !== 'direct'
-          && index >= arm.laneIn - facility.laneCount
-          && facility.data && facility.data.lanePaths) {
-        // Dedicated right-turn branch: contiguous from arm root through the curve.
-        const k = index - (arm.laneIn - facility.laneCount);
-        const branchPath = facility.data.lanePaths[k];
+      if (branchFacility && laneSets[index] && laneSets[index].has('right')) {
+        const k = index - (arm.laneIn - branchFacility.laneCount);
+        const branchPath = branchFacility.data.lanePaths[k];
         if (branchPath && branchPath.length >= 2) {
           path = [g.wp(armLength, s), ...branchPath];
         }
@@ -258,6 +265,21 @@ export function computeLaneTopology(geoms, { armLength = 46, facilities = [] } =
         armIndex: i, side: 'in', index, skip: false,
         id: laneIds.get(`${i}|in|${index}`) || `${i}|in|${index}`,
         path,
+      });
+    }
+    // Scheme-2 branch lanes: separate travel lanes that split off the outer
+    // through lane (their movement is not 'right', so no inbound lane was
+    // grafted). Their centreline is the branch path itself, from the split
+    // point through the curve to the merge.
+    const outerIsRight = laneSets[arm.laneIn - 1] && laneSets[arm.laneIn - 1].has('right');
+    if (branchFacility && !outerIsRight) {
+      branchFacility.data.lanePaths.forEach((branchPath, k) => {
+        if (!branchPath || branchPath.length < 2) return;
+        laneCenterlines.push({
+          armIndex: i, side: 'branch', index: k, skip: false,
+          id: `${i}|branch|${k}`,
+          path: branchPath,
+        });
       });
     }
     // Outbound lanes.

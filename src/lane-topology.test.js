@@ -98,14 +98,14 @@ describe('lane topology graph', () => {
     expect(random()).toBeGreaterThanOrEqual(0);
   });
 
-  it('gives a dedicated right-turn branch a contiguous connected centreline', () => {
+  it('scheme 1: a dedicated right-turn lane gets a contiguous centreline through the branch', () => {
     const geoms = [
-      fakeGeom(0, 3, 2, 'none', { type: 'split' }),
+      fakeGeom(0, 3, 2, 'none', { type: 'split' }, 1, 'dedicated'),
       fakeGeom(90, 2, 2),
       fakeGeom(180, 2, 2),
       fakeGeom(270, 2, 2),
     ];
-    // Arm 0: 3 inbound. The outermost inbound lane (index 2) is a dedicated
+    // Arm 0: 3 inbound. The outermost inbound lane (index 2) is the dedicated
     // split right-turn branch; its centreline must run from the arm root,
     // through the curved branch, to the merge - connected at both ends, never
     // floating mid-air.
@@ -116,10 +116,11 @@ describe('lane topology graph', () => {
     ];
     const { connections, laneCenterlines } = computeLaneTopology(geoms, { facilities });
 
-    // The dedicated branch produces no separate right connection (it is a
-    // continuous lane, not a through-movement edge).
+    // Scheme 1: the dedicated lane is a right-turn lane, so it has one right
+    // connection at the core AND its centreline runs through the branch.
     const rightConn = connections.filter((c) => c.movement === 'right' && c.fromArm === 0);
-    expect(rightConn).toHaveLength(0);
+    expect(rightConn).toHaveLength(1);
+    expect(rightConn[0].fromIndex).toBe(2);
 
     // The dedicated lane's centreline starts at the arm root (armLength=46 on
     // the +x arm) and is contiguous through the branch.
@@ -132,6 +133,41 @@ describe('lane topology graph', () => {
     // Through lanes keep a full straight centreline from the junction.
     const through = inLanes.find((cl) => cl.index === 0);
     expect(through.path[0].x).toBeCloseTo(18.5, 6); // nearU = R(18)+0.5
+    // No separate branch centreline in scheme 1: the branch IS the outer lane.
+    expect(laneCenterlines.some((cl) => cl.side === 'branch' && cl.armIndex === 0)).toBe(false);
+  });
+
+  it('scheme 2: the outer lane keeps its straight centreline and the branch gets its own', () => {
+    const geoms = [
+      fakeGeom(0, 3, 2, 'none', { type: 'split' }, 1, 'branch'),
+      fakeGeom(90, 2, 2),
+      fakeGeom(180, 2, 2),
+      fakeGeom(270, 2, 2),
+    ];
+    const branch = Array.from({ length: 12 }, (_, k) => ({ x: 32 - k * 2, y: -6 - k * 0.6 }));
+    const facilities = [
+      { type: 'split', laneCount: 1, data: { lanePaths: [branch], targetMergeU: 30 } },
+      null, null, null,
+    ];
+    const { laneCenterlines } = computeLaneTopology(geoms, { facilities });
+
+    // The outer lane is a through lane, so its centreline is straight along the
+    // full arm - it never veers into the branch (no "narrowing" before the
+    // guide triangle) and keeps running beyond the split point.
+    const inLanes = laneCenterlines.filter((cl) => cl.side === 'in' && cl.armIndex === 0);
+    const outer = inLanes.find((cl) => cl.index === 2);
+    expect(outer).toBeDefined();
+    expect(outer.path[0].x).toBeCloseTo(18.5, 6); // starts at nearU, not grafted
+    expect(outer.path.at(-1).x).toBeCloseTo(46, 6); // reaches the arm root
+    const outerS = -(0 / 2 + 2.5 * 3.25); // medW=0, lane index 2 -> s = -8.125
+    outer.path.forEach((p) => expect(p.y).toBeCloseTo(outerS, 6));
+
+    // The branch is its own lane: a centreline from the split point through
+    // the curve to the merge, so the topology shows both straight and branch.
+    const branchCl = laneCenterlines.filter((cl) => cl.side === 'branch' && cl.armIndex === 0);
+    expect(branchCl).toHaveLength(1);
+    expect(branchCl[0].path[0]).toEqual(branch[0]);       // starts at the split
+    expect(branchCl[0].path.at(-1)).toEqual(branch.at(-1)); // reaches the merge
   });
 
   it('scheme 1 (dedicated) adds a right connection for the outermost lane', () => {
