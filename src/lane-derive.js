@@ -601,7 +601,7 @@ export function deriveRoadScene(model, state, random = Math.random, topology = n
     if (!facility) return;
     const fd = rightTurnFacilityData(facility, g, facility.target, cfg);
     if (!fd) return;
-    scene.branchSurfaces.push({ pts: fd.surface });
+    if (fd.surface) scene.branchSurfaces.push({ pts: fd.surface });
     fd.dividers.forEach((div) => scene.branchDividers.push(div));
     scene.guideAreas.push({ pts: fd.guidePoly, planted: g.arm.rightTurnIsland === 'planted' });
     fd.guideChevronLegs.forEach((leg) => scene.guideChevrons.push(leg));
