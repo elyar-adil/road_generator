@@ -1,0 +1,136 @@
+import { describe, expect, it } from 'vitest';
+import {
+  armMovementTargets,
+  computeLaneTopology,
+  inboundToOutboundLane,
+  laneIndicesByMovement,
+} from './lane-topology.js';
+import { createSeededRandom } from './state.js';
+
+function fakeGeom(angleDeg, laneIn, laneOut, wait = 'none', right = { type: 'none' }, leftTurnLanes = 1) {
+  const a = angleDeg * Math.PI / 180;
+  const fwd = { x: Math.cos(a), y: Math.sin(a) };
+  const left = { x: -Math.sin(a), y: Math.cos(a) };
+  const laneW = 3.25;
+  const medW = 0;
+  const R = 18;
+  const inOuterS = medW / 2 + laneOut * laneW;
+  const outOuterS = -(medW / 2 + laneIn * laneW);
+  return {
+    arm: { angle: angleDeg, laneIn, laneOut, waitingArea: wait, leftTurnLanes, rightTurnLane: right.type !== 'none', rightTurnType: right.type, rightTurnLanes: 1 },
+    fwd, left, laneW, medW, R, inOuterS, outOuterS,
+    wp: (u, s) => ({ x: fwd.x * u + left.x * s, y: fwd.y * u + left.y * s }),
+  };
+}
+
+// A standard 4-way crossroads (arms at 0/90/180/270). No dedicated right-turn
+// lane so every movement (left/straight/right) appears.
+function crossGeoms() {
+  return [
+    fakeGeom(0, 2, 2),
+    fakeGeom(90, 2, 2),
+    fakeGeom(180, 2, 2),
+    fakeGeom(270, 2, 2),
+  ];
+}
+
+describe('lane topology graph', () => {
+  it('classifies movements in the planning plane', () => {
+    const targets = armMovementTargets(crossGeoms());
+    // Arm 0 (heading +x) sees 90 (left), 180 (straight), 270 (right).
+    expect(targets[0].left.arm.angle).toBe(90);
+    expect(targets[0].straight.arm.angle).toBe(180);
+    expect(targets[0].right.arm.angle).toBe(270);
+  });
+
+  it('maps inbound to outbound lanes preserving order', () => {
+    // Straight: inbound 0 -> outbound 0, inbound 1 -> outbound 1
+    expect(inboundToOutboundLane(0, 2, 2, 'straight')).toBe(0);
+    expect(inboundToOutboundLane(1, 2, 2, 'straight')).toBe(1);
+    // Right: outer lane folds to the outermost target lane
+    expect(inboundToOutboundLane(1, 2, 2, 'right')).toBe(1);
+    expect(inboundToOutboundLane(0, 2, 2, 'right')).toBe(0);
+  });
+
+  it('produces straight, left and right connections across a crossroads', () => {
+    const { connections } = computeLaneTopology(crossGeoms());
+    const movements = new Set(connections.map((c) => c.movement));
+    expect(movements.has('straight')).toBe(true);
+    expect(movements.has('left')).toBe(true);
+    expect(movements.has('right')).toBe(true);
+    // Each arm's inbound lanes produce connections, so there are many edges.
+    expect(connections.length).toBeGreaterThan(6);
+    connections.forEach((c) => {
+      expect(c.path.length).toBeGreaterThan(5);
+      expect(Number.isFinite(c.path[0].x)).toBe(true);
+      expect(Number.isFinite(c.path.at(-1).y)).toBe(true);
+    });
+  });
+
+  it('groups inbound lane indices by movement', () => {
+    const byMovement = laneIndicesByMovement([new Set(['left']), new Set(['straight'])]);
+    expect(byMovement.get('left')).toEqual([0]);
+    expect(byMovement.get('straight')).toEqual([1]);
+  });
+
+  it('makes left-turn waiting areas dedicate the median-side lanes', () => {
+    const geoms = [
+      fakeGeom(0, 4, 2, 'left', { type: 'none' }, 2),
+      fakeGeom(90, 2, 2),
+      fakeGeom(180, 2, 2),
+      fakeGeom(270, 2, 2),
+    ];
+    const { connections } = computeLaneTopology(geoms);
+    const leftConn = connections.filter((c) => c.movement === 'left' && c.fromArm === 0);
+    // The two median-side inbound lanes of arm 0 turn left.
+    expect(leftConn.some((c) => c.fromIndex === 0)).toBe(true);
+    expect(leftConn.some((c) => c.fromIndex === 1)).toBe(true);
+    const straightConn = connections.filter((c) => c.movement === 'straight' && c.fromArm === 0);
+    // The outer two lanes go straight.
+    expect(straightConn.map((c) => c.fromIndex).sort()).toEqual([2, 3]);
+  });
+
+  it('is deterministic for a fixed topology', () => {
+    const a = computeLaneTopology(crossGeoms());
+    const b = computeLaneTopology(crossGeoms());
+    expect(a.connections.length).toBe(b.connections.length);
+    const random = createSeededRandom(1);
+    expect(random()).toBeGreaterThanOrEqual(0);
+  });
+
+  it('gives a dedicated right-turn branch a contiguous connected centreline', () => {
+    const geoms = [
+      fakeGeom(0, 3, 2, 'none', { type: 'split' }),
+      fakeGeom(90, 2, 2),
+      fakeGeom(180, 2, 2),
+      fakeGeom(270, 2, 2),
+    ];
+    // Arm 0: 3 inbound. The outermost inbound lane (index 2) is a dedicated
+    // split right-turn branch; its centreline must run from the arm root,
+    // through the curved branch, to the merge - connected at both ends, never
+    // floating mid-air.
+    const branch = Array.from({ length: 12 }, (_, k) => ({ x: 32 - k * 2, y: -6 - k * 0.6 }));
+    const facilities = [
+      { type: 'split', laneCount: 1, data: { lanePaths: [branch], targetMergeU: 30 } },
+      null, null, null,
+    ];
+    const { connections, laneCenterlines } = computeLaneTopology(geoms, { facilities });
+
+    // The dedicated branch produces no separate right connection (it is a
+    // continuous lane, not a through-movement edge).
+    const rightConn = connections.filter((c) => c.movement === 'right' && c.fromArm === 0);
+    expect(rightConn).toHaveLength(0);
+
+    // The dedicated lane's centreline starts at the arm root (armLength=46 on
+    // the +x arm) and is contiguous through the branch.
+    const inLanes = laneCenterlines.filter((cl) => cl.side === 'in' && cl.armIndex === 0);
+    const dedicated = inLanes.find((cl) => cl.index === 2);
+    expect(dedicated).toBeDefined();
+    expect(dedicated.skip).toBe(false);
+    expect(dedicated.path[0].x).toBeCloseTo(46, 6); // connected to arm root
+    expect(dedicated.path).toContain(branch[0]);    // runs through the branch
+    // Through lanes keep a full straight centreline from the junction.
+    const through = inLanes.find((cl) => cl.index === 0);
+    expect(through.path[0].x).toBeCloseTo(18.5, 6); // nearU = R(18)+0.5
+  });
+});

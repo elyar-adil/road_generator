@@ -3,9 +3,9 @@ import { classifyArmMovement } from './road-movements.js';
 export const PROJECT_FORMAT = 'intersection-studio';
 export const PROJECT_VERSION = 3;
 
-const CENTER_MODES = new Set(['planted', 'doubleYellowRail', 'doubleYellow']);
-const WAITING_AREA_TYPES = new Set(['none', 'left', 'straight']);
-const RIGHT_ISLAND_TYPES = new Set(['planted', 'hatched']);
+export const CENTER_MODES = new Set(['planted', 'doubleYellowRail', 'doubleYellow']);
+export const WAITING_AREA_TYPES = new Set(['none', 'left', 'straight']);
+export const RIGHT_ISLAND_TYPES = new Set(['planted', 'hatched']);
 export const RIGHT_TURN_TYPES = new Set(['none', 'direct', 'split', 'slip']);
 
 const DEFAULT_ARMS = [
@@ -35,6 +35,16 @@ export function sampleIntersectionSize(random = Math.random) {
 
 export function normalizeAngle(value) {
   return ((Math.round(finite(value, 0)) % 360) + 360) % 360;
+}
+
+// Per-field numeric normalizer used by the editor for live input. Single source
+// of truth for the allowed ranges shared between state sanitization and the UI.
+export function normaliseArmValue(field, value) {
+  if (field === 'angle') return normalizeAngle(value);
+  if (field === 'medianWidth') return Math.min(4, Math.max(0, Math.round(finite(value, 1) * 10) / 10));
+  if (field === 'leftTurnLanes') return Math.min(2, Math.max(1, Math.round(finite(value, 1))));
+  if (field === 'rightTurnLanes') return Math.min(2, Math.max(1, Math.round(finite(value, 1))));
+  return Math.min(6, Math.max(0, Math.round(finite(value, 0))));
 }
 
 export function angleDistance(a, b) {
@@ -97,6 +107,8 @@ export function createDefaultProject() {
     showLights: true,
     showSidewalk: true,
     showBuildings: true,
+    showTopology: false,
+    showSegmentDemo: false,
     showGrid: false,
     scenerySeed,
     trafficSpeed: 1,
@@ -141,6 +153,8 @@ export function sanitizeProject(value) {
     showLights: boolean(source.showLights, defaults.showLights),
     showSidewalk: boolean(source.showSidewalk, defaults.showSidewalk),
     showBuildings: boolean(source.showBuildings, defaults.showBuildings),
+    showTopology: boolean(source.showTopology, defaults.showTopology),
+    showSegmentDemo: boolean(source.showSegmentDemo, defaults.showSegmentDemo),
     showGrid: boolean(source.showGrid, defaults.showGrid),
     scenerySeed: Math.round(clamp(scenerySeed, 1, 99999999)),
     trafficSpeed: Math.round(clamp(finite(source.trafficSpeed, defaults.trafficSpeed), 0.25, 3) * 4) / 4,

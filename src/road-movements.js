@@ -58,3 +58,33 @@ export function laneMovementSets(laneCount,available,dedicatedLeftLanes=0,dedica
     return filtered.size?filtered:new Set([fallback]);
   });
 }
+
+// How many inbound lanes an approach can dedicate to left turns at the
+// intersection, matching the geometry the arrows/rays render.
+export function leftTurnCapacity(arm, target){
+  if(!target || arm.laneIn<3) return 0;
+  return Math.min(2, arm.leftTurnLanes, arm.laneIn-2, target.arm.laneOut);
+}
+
+// How many inbound lanes an approach can dedicate to a channelized right turn.
+export function rightTurnCapacity(arm, target){
+  if(!arm?.rightTurnLane || arm.rightTurnType==='none' || !target) return 0;
+  const requested=Math.min(2, arm.rightTurnLanes);
+  return arm.laneIn>=requested && target.arm.laneOut>=requested ? requested : 0;
+}
+
+// Single source of truth for lane->movement assignment. Both the rendered lane
+// arrows and the topology graph must use this so they always agree.
+//   arm:        the arm config (laneIn, waitingArea, leftTurnLanes, rightTurn*)
+//   available:  Set of reachable movement types (straight/left/right)
+//   leftTarget,rightTarget: the geoms reached by left/right movements (may be null)
+export function armLaneMovementSets(arm, available, leftTarget, rightTarget){
+  const dedicatedLeftLanes = arm.waitingArea==='left'
+    ? leftTurnCapacity(arm, leftTarget)
+    : 0;
+  const rightCount = rightTurnCapacity(arm, rightTarget);
+  const dedicatedRight = rightCount>0
+    ? (arm.rightTurnType==='direct' ? rightCount : true)
+    : 0;
+  return laneMovementSets(arm.laneIn, available, dedicatedLeftLanes, dedicatedRight);
+}

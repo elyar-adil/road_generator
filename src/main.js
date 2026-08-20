@@ -5,11 +5,16 @@ import {
   createProjectDocument,
   createSeededRandom,
   getProjectStats,
+  normaliseArmValue,
   parseProjectDocument,
+  RIGHT_ISLAND_TYPES,
+  RIGHT_TURN_TYPES,
   sampleIntersectionSize,
+  sanitizeArm,
   sanitizeProject,
   slugifyProjectName,
   validateProject,
+  WAITING_AREA_TYPES,
 } from './state.js';
 import {
   downloadBlob,
@@ -26,8 +31,17 @@ import {
   trimPolyline,
   trimBeforeLaneEnvelope,
 } from './waiting-area.js';
-import { classifyArmMovement,classifyMovement,laneMovementSets } from './road-movements.js';
-import { computeRightTurnLayout } from './right-turn.js';
+import {
+  add, sub, scl, lerp2, len, v2, normalize,
+  fillet, lineIntersect, pointInRing, rayBoundaryIntersect,
+} from './geometry.js';
+import { classifyArmMovement,classifyMovement,armLaneMovementSets } from './road-movements.js';
+import { buildRightTurnPathData, computeRightTurnLayout } from './right-turn.js';
+import { computeLaneTopology } from './lane-topology.js';
+import {
+  buildLaneTaper, buildSegmentSurface, buildSidewalkBounds,
+  laneBundleBounds, placeStreetLights,
+} from './segment.js';
 
 /* ======================================================================
    程序化路口生成器
@@ -111,6 +125,18 @@ scene.add(fillLight);
 const worldGroup = new THREE.Group();
 scene.add(worldGroup);
 
+// Lane-topology overlay: toggleable colored centreline graph visible in both
+// the 3D perspective and top-down orthographic views.
+const topologyGroup = new THREE.Group();
+topologyGroup.visible = false;
+scene.add(topologyGroup);
+topologyGroup.renderOrder = 999;
+
+// Diverge/merge corridor demo, composed from the reusable segment primitives.
+const segmentGroup = new THREE.Group();
+segmentGroup.visible = false;
+scene.add(segmentGroup);
+
 const gridHelper = new THREE.GridHelper(200,40,0x8aa69b,0x61736d);
 gridHelper.position.y = 0.022;
 gridHelper.material.transparent = true;
@@ -189,12 +215,6 @@ window.addEventListener('resize', ()=>{
 });
 
 // ---------------------------------------------------------------- GEOMETRY HELPERS
-function v2(x,z){ return {x,y:z}; } // using .y to store "world Z" for 2D math convenience
-function add(a,b){return v2(a.x+b.x,a.y+b.y);}
-function scl(a,s){return v2(a.x*s,a.y*s);}
-function sub(a,b){return v2(a.x-b.x,a.y-b.y);}
-function len(a){return Math.hypot(a.x,a.y);}
-function lerp2(a,b,t){return v2(a.x+(b.x-a.x)*t, a.y+(b.y-a.y)*t);}
 
 function buildPathStrip(path, width, offset){
   if(!path || path.length<2) return null;
@@ -289,114 +309,8 @@ function buildMedianIsland(g,noseInnerU){
   return group;
 }
 
-function cubicPoint2(p0,p1,p2,p3,t){
-  const mt=1-t;
-  return v2(
-    mt*mt*mt*p0.x+3*mt*mt*t*p1.x+3*mt*t*t*p2.x+t*t*t*p3.x,
-    mt*mt*mt*p0.y+3*mt*mt*t*p1.y+3*mt*t*t*p2.y+t*t*t*p3.y,
-  );
-}
-
-function appendCubic2(path,p0,p1,p2,p3,segments=8){
-  for(let i=1;i<=segments;i++) path.push(cubicPoint2(p0,p1,p2,p3,i/segments));
-}
-
-function rightTurnLaneCenter(g,laneIndex,direction){
-  return direction==='source'
-    ? g.outOuterS+(laneIndex+0.5)*g.laneW
-    : g.inOuterS-(laneIndex+0.5)*g.laneW;
-}
-
-function buildDirectRightTurnPath(fromG,toG,laneIndex){
-  const start=fromG.wp(fromG.R+0.15,rightTurnLaneCenter(fromG,laneIndex,'source'));
-  const end=toG.wp(toG.R+0.15,rightTurnLaneCenter(toG,laneIndex,'target'));
-  const chord=len(sub(end,start));
-  if(chord<1.5) return null;
-  const handle=Math.min(12,Math.max(3.2,chord*0.34));
-  const path=[start];
-  appendCubic2(path,
-    start,add(start,scl(fromG.fwd,-handle)),
-    add(end,scl(toG.fwd,-handle)),end,14,
-  );
-  return path;
-}
-
-function offsetLanePaths(path,laneCount,laneWidth,taperPoints=0){
-  const bundleWidth=laneCount*laneWidth;
-  return Array.from({length:laneCount},(_,laneIndex)=>path.map((point,index)=>{
-    const previous=path[Math.max(0,index-1)], next=path[Math.min(path.length-1,index+1)];
-    const tangent=sub(next,previous), tangentLength=len(tangent)||1;
-    const normal=v2(-tangent.y/tangentLength,tangent.x/tangentLength);
-    const offset=bundleWidth/2-(laneIndex+0.5)*laneWidth;
-    const taper=taperPoints>0 ? Math.min(1,index/taperPoints) : 1;
-    return add(point,scl(normal,offset*taper));
-  }));
-}
-
 function rightTurnPathData(fromG,toG,type,laneCount){
-  if(!fromG || !toG || laneCount<1) return null;
-  if(type==='direct'){
-    const lanePaths=Array.from({length:laneCount},(_,laneIndex)=>
-      buildDirectRightTurnPath(fromG,toG,laneIndex),
-    ).filter(Boolean);
-    return lanePaths.length===laneCount ? {type,lanePaths} : null;
-  }
-
-  const laneW=fromG.laneW;
-  const bundleWidth=laneW*laneCount;
-  const {turnU,nearSplitU,slipSplitU,targetMergeU}=computeRightTurnLayout({
-    fromRadius:fromG.R,
-    targetRadius:toG.R,
-    armLength:state.armLength,
-    laneWidth:laneW,
-  });
-  const splitU=type==='slip' ? slipSplitU : nearSplitU;
-  const sourceAnchor=fromG.wp(splitU,fromG.outOuterS+bundleWidth/2);
-  const sourceNear=fromG.wp(turnU,fromG.outOuterS-bundleWidth/2);
-  const targetNear=toG.wp(turnU,toG.inOuterS-bundleWidth/2);
-  const targetAnchor=toG.wp(targetMergeU,toG.inOuterS-bundleWidth/2);
-  const turnChord=len(sub(sourceNear,targetNear));
-  if(turnChord<2) return null;
-  const turnHandle=Math.min(18,Math.max(4.5,turnChord*0.39));
-  const sourceHandle=Math.min(10,Math.max(3,len(sub(sourceAnchor,sourceNear))*0.42));
-  const path=[sourceAnchor];
-  appendCubic2(path,
-    sourceAnchor,add(sourceAnchor,scl(fromG.fwd,-sourceHandle)),
-    add(sourceNear,scl(fromG.fwd,sourceHandle)),sourceNear,8,
-  );
-  const sourceTaperEnd=path.length-1;
-  appendCubic2(path,
-    sourceNear,add(sourceNear,scl(fromG.fwd,-turnHandle)),
-    add(targetNear,scl(toG.fwd,-turnHandle)),targetNear,14,
-  );
-  const turnEnd=path.length-1;
-  for(let index=1;index<=6;index++) path.push(lerp2(targetNear,targetAnchor,index/6));
-  const offsets=variableOffsetPath(path,bundleWidth/2,0);
-  const guideInner=offsets.right.slice(sourceTaperEnd,turnEnd+1);
-  const guideApex=lineIntersect(
-    guideInner[0],add(guideInner[0],scl(fromG.fwd,-1)),
-    guideInner.at(-1),add(guideInner.at(-1),scl(toG.fwd,-1)),
-  ) ?? lerp2(guideInner[0],guideInner.at(-1),0.5);
-  return {
-    type,path,offsets,lanePaths:offsetLanePaths(path,laneCount,laneW),
-    sourceAnchor,targetAnchor,sourceTaperEnd,turnEnd,
-    outerBoundary:offsets.left,innerBoundary:offsets.right,
-    guideInner,guideApex,
-    splitU,turnU,targetMergeU,bundleWidth,
-  };
-}
-
-function variableOffsetPath(path,halfWidth,taperPoints=0){
-  const left=[],right=[];
-  for(let i=0;i<path.length;i++){
-    const previous=path[Math.max(0,i-1)], next=path[Math.min(path.length-1,i+1)];
-    const tangent=sub(next,previous), tangentLen=len(tangent)||1;
-    const normal=v2(-tangent.y/tangentLen,tangent.x/tangentLen);
-    const scaleFactor=taperPoints>0 ? Math.min(1,i/taperPoints) : 1;
-    left.push(add(path[i],scl(normal,halfWidth*scaleFactor)));
-    right.push(add(path[i],scl(normal,-halfWidth*scaleFactor)));
-  }
-  return {left,right};
+  return buildRightTurnPathData(fromG,toG,type,laneCount,{armLength:state.armLength});
 }
 
 function addRightTurnCrossingAndYield(path,laneW){
@@ -476,14 +390,6 @@ function addGuardrail(g,uStart,uEnd,lateral,yBottom=0.02,height=0.78){
   if(rail) worldGroup.add(rail);
 }
 
-function lineIntersect(p1,p2,p3,p4){
-  const d1x=p2.x-p1.x, d1y=p2.y-p1.y, d2x=p4.x-p3.x, d2y=p4.y-p3.y;
-  const denom = d1x*d2y - d1y*d2x;
-  if(Math.abs(denom) < 1e-6) return null;
-  const t = ((p3.x-p1.x)*d2y - (p3.y-p1.y)*d2x)/denom;
-  return v2(p1.x+d1x*t, p1.y+d1y*t);
-}
-
 // ---------------------------------------------------------------- TOPOLOGY + GEOMETRY BUILD
 function computeArmGeom(arm){
   const a = arm.angle*Math.PI/180;
@@ -546,28 +452,6 @@ function updateCornerTrims(geoms){
     g.nearMedL=g.wp(g.R,g.medW/2);
     g.nearMedR=g.wp(g.R,-g.medW/2);
   });
-}
-
-function fillet(p0, edge0dir, p1, edge1dir, segN){
-  const chordVec = sub(p1,p0);
-  const chord = len(chordVec);
-  if(chord<1e-4) return [];
-  const d0 = len(edge0dir)>1e-4 ? scl(edge0dir,1/len(edge0dir)) : scl(chordVec,1/chord);
-  const d1 = len(edge1dir)>1e-4 ? scl(edge1dir,1/len(edge1dir)) : scl(chordVec,1/chord);
-  const bend = Math.abs(d0.x*d1.y-d0.y*d1.x);
-  const handle = Math.min(chord*0.42, Math.max(chord*0.16, chord*(0.22+0.12*bend)));
-  const c0 = add(p0,scl(d0,handle));
-  const c1 = sub(p1,scl(d1,handle));
-  const pts=[];
-  for(let i=1;i<segN;i++){
-    const t=i/segN;
-    const mt=1-t;
-    pts.push(v2(
-      mt*mt*mt*p0.x + 3*mt*mt*t*c0.x + 3*mt*t*t*c1.x + t*t*t*p1.x,
-      mt*mt*mt*p0.y + 3*mt*mt*t*c0.y + 3*mt*t*t*c1.y + t*t*t*p1.y
-    ));
-  }
-  return pts;
 }
 
 function constrainFilletPoint(p, gi, gj){
@@ -845,48 +729,6 @@ function addGuideChevrons(guideInner,guideApex,guidePoints){
   }
 }
 
-// First intersection of a ray (point + unit direction) with a boundary
-// polyline; falls back to the nearest boundary point when the ray misses.
-// With `closed` the boundary is treated as a ring (last point wraps to first).
-function rayBoundaryIntersect(point,direction,boundary,closed=false){
-  let best=null,bestDistance=Infinity;
-  const count=boundary.length-(closed?0:1);
-  for(let i=0;i<count;i++){
-    const a=boundary[i], b=boundary[(i+1)%boundary.length];
-    const ab=sub(b,a);
-    const denom=direction.x*ab.y-direction.y*ab.x;
-    if(Math.abs(denom)<1e-9) continue;
-    const t=((a.x-point.x)*ab.y-(a.y-point.y)*ab.x)/denom;
-    const u=((a.x-point.x)*direction.y-(a.y-point.y)*direction.x)/denom;
-    if(t>1e-3 && u>=-1e-4 && u<=1+1e-4 && t<bestDistance){
-      bestDistance=t;
-      best=add(point,scl(direction,t));
-    }
-  }
-  if(best) return best;
-  let nearest=null,nearestDistance=Infinity;
-  for(let i=0;i<count;i++){
-    const a=boundary[i], b=boundary[(i+1)%boundary.length];
-    const ab=sub(b,a);
-    const abLength=len(ab)||1;
-    const u=Math.min(1,Math.max(0,((point.x-a.x)*ab.x+(point.y-a.y)*ab.y)/(abLength*abLength)));
-    const candidate=add(a,scl(ab,u));
-    const distance=len(sub(candidate,point));
-    if(distance<nearestDistance){nearestDistance=distance;nearest=candidate;}
-  }
-  return nearest;
-}
-
-function pointInRing(point,ring){
-  let inside=false;
-  for(let i=0,j=ring.length-1;i<ring.length;j=i++){
-    const xi=ring[i].x,yi=ring[i].y,xj=ring[j].x,yj=ring[j].y;
-    const intersect=((yi>point.y)!==(yj>point.y))&&(point.x<(xj-xi)*(point.y-yi)/(yj-yi)+xi);
-    if(intersect) inside=!inside;
-  }
-  return inside;
-}
-
 function buildArrowMeshOnPath(path,types){
   const group=new THREE.Group();
   const total=polylineLength(path);
@@ -1114,6 +956,64 @@ function buildTrafficLight(){
 
 // ---------------------------------------------------------------- MAIN GENERATE
 const trafficLights = [];
+
+function disposeGroup(group){
+  group.traverse(obj=>{
+    if(obj.geometry) obj.geometry.dispose();
+    const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+    materials.filter(Boolean).forEach(material=>{
+      if(!Object.values(matCache).includes(material)) material.dispose();
+    });
+  });
+}
+
+const MOVEMENT_COLORS = { straight:0x4aa3ff, left:0x37d17a, right:0xff6b4a };
+const LANE_CENTERLINE_COLOR = 0xc3cad6;
+
+// Render the lane-level topology graph as floating centreline ribbon segments.
+// Lane centreline polylines run along the full length of every arm (so the
+// topology extends wherever there is road); the intersection connections are
+// coloured per movement and the lane endpoints are dotted. Dedicated right-turn
+// branch lanes get their centreline from the curved branch (never through a
+// guide triangle), and sidewalks/guide triangles carry no centreline.
+function renderTopologyOverlay(geoms, facilities){
+  disposeGroup(topologyGroup);
+  topologyGroup.clear();
+  topologyGroup.visible = state.showTopology;
+  if(!state.showTopology || geoms.length<2) return;
+  const topology = computeLaneTopology(geoms, {
+    armLength: state.armLength,
+    facilities: facilities || [],
+  });
+  topology.laneCenterlines.forEach(cl=>{
+    if(cl.skip) return;
+    for(let i=0;i<cl.path.length-1;i++){
+      const seg = boxAlong(cl.path[i],cl.path[i+1],{
+        lateral:0,width:0.12,height:0.05,yBottom:0.12,
+        color:LANE_CENTERLINE_COLOR,rough:0.5,extend:0,
+      });
+      if(seg) topologyGroup.add(seg);
+    }
+  });
+  topology.connections.forEach(conn=>{
+    const color = MOVEMENT_COLORS[conn.movement] || 0xffffff;
+    for(let i=0;i<conn.path.length-1;i++){
+      const seg = boxAlong(conn.path[i],conn.path[i+1],{
+        lateral:0,width:0.16,height:0.06,yBottom:0.13,
+        color,rough:0.5,extend:0,
+      });
+      if(seg) topologyGroup.add(seg);
+    }
+  });
+  topology.lanes.forEach(lane=>{
+    const dotRadius = lane.side==='in' ? 0.16 : 0.12;
+    const dotColor = lane.side==='in' ? 0xffd166 : 0x9b5de5;
+    const dot = new THREE.Mesh(new THREE.SphereGeometry(dotRadius,10,10), matStd(dotColor,0.4));
+    dot.position.set(lane.point.x, 0.16, lane.point.y);
+    topologyGroup.add(dot);
+  });
+}
+
 function clearWorld(){
   worldGroup.traverse(obj=>{
     if(obj.geometry) obj.geometry.dispose();
@@ -1123,6 +1023,96 @@ function clearWorld(){
     });
   });
   worldGroup.clear();
+}
+
+function addStrip(group, centreline, halfWidth, y, color, rough){
+  const { ring } = buildSegmentSurface(centreline, halfWidth);
+  const mesh = buildFlatPoly(ring, [], y, color, { rough });
+  if(mesh) group.add(mesh);
+  return mesh;
+}
+
+function addPathLine(group, path, width, yBottom, color){
+  for(let i=0;i<path.length-1;i++){
+    const seg = boxAlong(path[i],path[i+1],{
+      lateral:0,width,height:0.01,yBottom,color,rough:0.6,extend:0,
+    });
+    if(seg) group.add(seg);
+  }
+}
+
+// Diverge/merge corridor demo: a straight 3-lane carriageway that slims to 2
+// lanes as one lane peels off into a paralleled side lane (3->2 diverge),
+// keeping a constant-width offset lane, then widens back to 3 (2->3 merge).
+// Sidewalks and street lights are laid along the same segment primitives,
+// demonstrating how a single reusable abstraction dresses any road - and later
+// an interchange ramp.
+function buildSegmentDemo(){
+  disposeGroup(segmentGroup);
+  segmentGroup.clear();
+  segmentGroup.visible = state.showSegmentDemo;
+  if(!state.showSegmentDemo) return;
+
+  const laneW = state.laneWidth;
+  const { inOuterS, outOuterS } = laneBundleBounds(3, 3, laneW, 1.2);
+  const halfWidth = (inOuterS - outOuterS) / 2;
+  const origin = { point:{x:0,y:0}, fwd:{x:1,y:0}, left:{x:0,y:1} };
+  // Full corridor centreline: 3 lanes from x=0..30, 2 lanes 30..104, 3 lanes 104...
+  const centreline = Array.from({ length: 151 }, (_, i) => ({ x: i, y: 0 }));
+
+  // Main carriageway surface for the full corridor length.
+  addStrip(segmentGroup, centreline, halfWidth, 0.01, COLORS.asphalt, 0.95);
+
+  // 3 -> 2 diverge: the outermost +left lane feathers off x=30..44.
+  const diverge = buildLaneTaper({ origin, laneWidth:laneW, splitLanes:1, taperStart:30, taperEnd:44, side:1 });
+  // The offset lane continues at constant width beside the corridor x=44..104.
+  const offS = sideLateral(inOuterS, laneW);
+  const offsetCentre = Array.from({ length: 61 }, (_, i) => ({ x: 44 + i, y: offS }));
+  addStrip(segmentGroup, diverge.centreline, laneW / 2, 0.01, COLORS.asphalt, 0.95);
+  addStrip(segmentGroup, offsetCentre, laneW / 2, 0.01, COLORS.asphalt, 0.95);
+
+  // 2 -> 3 merge: the offset lane tapers back in to regain the 3rd lane x=104..118.
+  const mergeOrigin = { point:{x:104,y:0}, fwd:{x:1,y:0}, left:{x:0,y:1} };
+  const merge = buildLaneTaper({ origin:mergeOrigin, laneWidth:laneW, splitLanes:1, taperStart:0, taperEnd:14, side:1 });
+  addStrip(segmentGroup, merge.centreline, laneW / 2, 0.01, COLORS.asphalt, 0.95);
+
+  // Lane dividers on the main corridor (constant lane boundaries).
+  [1, 2].forEach((k) => {
+    const divider = offsetPolyline(centreline, k * laneW).left;
+    addPathLine(segmentGroup, divider, 0.14, 0.02, COLORS.white);
+  });
+  // Outer edges of the 3-lane corridor.
+  addPathLine(segmentGroup, offsetPolyline(centreline, inOuterS).left, 0.14, 0.02, COLORS.white);
+  addPathLine(segmentGroup, offsetPolyline(centreline, outOuterS).right, 0.14, 0.02, COLORS.white);
+  // Offset lane boundary (its +left edge).
+  addPathLine(segmentGroup, offsetPolyline(offsetCentre, laneW / 2).left, 0.14, 0.02, COLORS.white);
+
+  // Sidewalk edges along both sides of the full 3-lane corridor.
+  const sw = buildSidewalkBounds(centreline, halfWidth, state.sidewalkWidth, 0.25);
+  addStrip(segmentGroup, sw.left.outer, state.sidewalkWidth, -0.01, COLORS.sidewalk, 1);
+  addStrip(segmentGroup, sw.right.outer, state.sidewalkWidth, -0.01, COLORS.sidewalk, 1);
+
+  // Street lights along the corridor centreline.
+  placeStreetLights(centreline, { spacing:22, start:12, end:170, lateral: halfWidth + 0.5 }).forEach(({ point, tangent })=>{
+    const dirOut = normalize(tangent);
+    const poleMat = matStd(0x2c3036,0.5);
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.05,0.07,3.6,8), poleMat);
+    pole.position.set(point.x,1.8,point.y); pole.castShadow=true;
+    segmentGroup.add(pole);
+    const armMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.04,0.9,6), poleMat);
+    armMesh.rotation.z = Math.PI/2.6;
+    armMesh.position.set(point.x+0.35*dirOut.x, 3.5, point.y+0.35*dirOut.y);
+    segmentGroup.add(armMesh);
+    const lampMat = new THREE.MeshStandardMaterial({color:0xfff1c2, emissive:0xffdd88, emissiveIntensity:0.9, roughness:0.4});
+    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.14,10,8), lampMat);
+    lamp.position.set(point.x+0.75*dirOut.x, 3.35, point.y+0.75*dirOut.y);
+    segmentGroup.add(lamp);
+  });
+}
+
+function sideLateral(inOuterS, laneW){
+  // The pealed (outermost) lane centre sits just outside the reduced carriageway.
+  return inOuterS - laneW + laneW / 2;
 }
 function regenerate(){
   clearWorld();
@@ -1134,7 +1124,7 @@ function regenerate(){
   updateArmRadii(geoms);
   updateCornerTrims(geoms);
   const n = geoms.length;
-  if(n<2) return;
+  if(n<2){ renderTopologyOverlay(geoms, []); buildSegmentDemo(); updateProjectInsights(); return; }
 
   // available movement types per arm (based on which other arms are reachable as straight/left/right)
   const availPerArm = geoms.map((g,i)=>{
@@ -1155,9 +1145,6 @@ function regenerate(){
     const arm = g.arm;
     if(arm.laneIn<=0 && arm.laneOut<=0) return;
     const rightFacility=rightFacilities[i];
-    const rightLaneSetting=rightFacility
-      ? (rightFacility.type==='direct' ? rightFacility.laneCount : true)
-      : 0;
     const crosswalkStart=g.R+0.7;
     const crosswalkEnd=Math.min(g.R+4.2,state.armLength-1.8);
     const hasCrosswalkSpace=crosswalkEnd-crosswalkStart>1.2;
@@ -1248,7 +1235,7 @@ function regenerate(){
     const leftTarget=leftTargets[i];
     const dedicatedLeftLanes=arm.waitingArea==='left' ? leftTurnLaneCapacity(arm,leftTarget) : 0;
     const movementSets=arm.laneIn>0
-      ? laneMovementSets(arm.laneIn,availPerArm[i],dedicatedLeftLanes,rightLaneSetting)
+      ? armLaneMovementSets(arm,availPerArm[i],leftTargets[i],rightTargets[i])
       : [];
 
     // Waiting areas are explicit per approach. Right-turn movements never
@@ -1416,6 +1403,8 @@ function regenerate(){
   }
 
   gridHelper.visible = state.showGrid;
+  renderTopologyOverlay(geoms, rightFacilities);
+  buildSegmentDemo();
   updateProjectInsights();
 }
 
@@ -1547,7 +1536,7 @@ function syncSlider(id,key,digits,shouldRegenerate){
 
 sliderConfigs.forEach(config=>syncSlider(...config));
 
-const layerIds=['showArrows','showCrosswalk','showWaitingAreas','showLights','showSidewalk','showBuildings'];
+const layerIds=['showArrows','showCrosswalk','showWaitingAreas','showLights','showSidewalk','showBuildings','showTopology','showSegmentDemo'];
 layerIds.forEach(id=>{
   const el=document.getElementById(id);
   el.checked=Boolean(state[id]);
@@ -1607,18 +1596,7 @@ document.getElementById('trafficPauseBtn').addEventListener('click',()=>{
 });
 
 function angleDistance(a,b){ return Math.abs(((a-b+540)%360)-180); }
-function normaliseArmValue(field,value){
-  if(field==='angle') return ((Math.round(value)%360)+360)%360;
-  if(field==='medianWidth') return Math.min(4,Math.max(0,Math.round(value*10)/10));
-  if(field==='leftTurnLanes') return Math.min(2,Math.max(1,Math.round(value)));
-  if(field==='rightTurnLanes') return Math.min(2,Math.max(1,Math.round(value)));
-  return Math.min(6,Math.max(0,Math.round(value)));
-}
 
-const CENTER_MODES=new Set(['planted','doubleYellowRail','doubleYellow']);
-const WAITING_AREA_TYPES=new Set(['none','left','straight']);
-const RIGHT_ISLAND_TYPES=new Set(['planted','hatched']);
-const RIGHT_TURN_TYPES=new Set(['none','direct','split','slip']);
 function randomCenterMode(){
   const value=Math.random();
   if(value<0.35) return 'planted';
@@ -1643,18 +1621,9 @@ function makeArm(angle,laneIn=2,laneOut=2){
 }
 
 function normaliseArm(arm){
-  if(!CENTER_MODES.has(arm.centerMode)) arm.centerMode='doubleYellow';
-  if(!WAITING_AREA_TYPES.has(arm.waitingArea)) arm.waitingArea='none';
-  if(!RIGHT_ISLAND_TYPES.has(arm.rightTurnIsland)) arm.rightTurnIsland='planted';
-  if(!RIGHT_TURN_TYPES.has(arm.rightTurnType)) arm.rightTurnType=arm.rightTurnLane?'split':'none';
-  arm.rightTurnLane=arm.rightTurnType!=='none';
-  arm.medianWidth=normaliseArmValue('medianWidth',Number.isFinite(+arm.medianWidth)?+arm.medianWidth:1);
-  arm.leftTurnLanes=normaliseArmValue('leftTurnLanes',Number.isFinite(+arm.leftTurnLanes)?+arm.leftTurnLanes:1);
-  arm.rightTurnLanes=arm.rightTurnLane
-    ? normaliseArmValue('rightTurnLanes',Number.isFinite(+arm.rightTurnLanes)?+arm.rightTurnLanes:1)
-    : 0;
-  arm.leftGuardrail=Boolean(arm.leftGuardrail);
-  arm.rightGuardrail=Boolean(arm.rightGuardrail);
+  // Delegate to the single validation source of truth; copy the sanitized
+  // fields back in place so the editor's live closures keep working.
+  Object.assign(arm, sanitizeArm(arm));
   return arm;
 }
 
