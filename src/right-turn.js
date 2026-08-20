@@ -73,7 +73,7 @@ export function buildRightTurnPathData(fromG, toG, type, laneCount, { armLength 
     laneWidth: laneW,
   });
   const splitU = type === 'slip' ? slipSplitU : nearSplitU;
-  const sourceAnchor = fromG.wp(splitU, fromG.outOuterS + bundleWidth / 2);
+  const sourceAnchor = fromG.wp(splitU, fromG.outOuterS);
   const sourceNear = fromG.wp(turnU, fromG.outOuterS - bundleWidth / 2);
   const targetNear = toG.wp(turnU, toG.inOuterS - bundleWidth / 2);
   const targetAnchor = toG.wp(targetMergeU, toG.inOuterS - bundleWidth / 2);
