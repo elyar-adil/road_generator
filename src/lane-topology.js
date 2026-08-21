@@ -202,30 +202,14 @@ export function computeLaneTopology(geoms, { armLength = 46, facilities = [] } =
     return path;
   };
 
-  // Which outbound lanes on which arm are merge receivers, and the longitudinal
-  // station (in the target frame) where the branch re-enters, so their centreline
-  // starts downstream of the merge triangle.
-  const mergeReceivers = new Map(); // `${targetIndex}|out|${outLane}` -> mergeU
-  (facilities || []).forEach((facility, srcIdx) => {
-    if (!facility || facility.type === 'direct' || !facility.data?.lanePaths) return;
-    const targetG = facility.target;
-    if (!targetG) return;
-    const tIdx = geoms.indexOf(targetG);
-    const laneOut = targetG.arm.laneOut;
-    const mergeU = facility.data.targetMergeU != null ? facility.data.targetMergeU : nearU(targetG);
-    for (let k = 0; k < facility.laneCount; k += 1) {
-      const outLane = Math.max(0, laneOut - 1 - k);
-      mergeReceivers.set(`${tIdx}|out|${outLane}`, mergeU);
-    }
-  });
-
   // Collect every guide triangle (导流区) so no topology polyline ever crosses
   // one: guide triangles are edge-conditioned islands derived around (and never
   // on) travel-lane centrelines.
   const guideTriangles = [];
   (facilities || []).forEach((facility) => {
-    if (!facility?.data?.guideInner || !facility.data.guideApex) return;
-    guideTriangles.push([...facility.data.guideInner, facility.data.guideApex]);
+    const poly = facility?.data?.guidePoly;
+    if (!poly || poly.length < 3) return;
+    guideTriangles.push(poly);
   });
   const clipPath = (path) => {
     if (!path || !guideTriangles.length) return path;
@@ -282,15 +266,16 @@ export function computeLaneTopology(geoms, { armLength = 46, facilities = [] } =
         });
       });
     }
-    // Outbound lanes.
+    // Outbound lanes. A merge-receiving lane keeps its full straight centreline
+    // from the arm root so the through road stays visually continuous up to (and
+    // through) where the branch hands off; points that fall into any guide
+    // triangle are clipped afterwards, so no truncation is needed here.
     for (let index = 0; index < arm.laneOut; index += 1) {
       const s = g.medW / 2 + (index + 0.5) * g.laneW;
-      const mergeU = mergeReceivers.get(`${i}|out|${index}`);
-      const uStart = mergeU != null ? Math.max(nearU(g), mergeU) : nearU(g);
       laneCenterlines.push({
         armIndex: i, side: 'out', index, skip: false,
         id: laneIds.get(`${i}|out|${index}`) || `${i}|out|${index}`,
-        path: armPath(g, s, uStart),
+        path: armPath(g, s, nearU(g)),
       });
     }
   });

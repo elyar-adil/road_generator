@@ -7,8 +7,8 @@
 // merge logic be reused (right-turn lanes today, interchange ramps later).
 
 import {
-  add, scl, sub, len, lerp2, clamp,
-  appendCubic2, lineIntersect, offsetLanePaths, taperedOffsetPath,
+  add, scl, sub, len, clamp,
+  appendCubic2, offsetLanePaths, offsetPolyline, edgeLine, fillet,
 } from './geometry.js';
 
 export function computeRightTurnLayout({ fromRadius, targetRadius, armLength, laneWidth }) {
@@ -73,39 +73,56 @@ export function buildRightTurnPathData(fromG, toG, type, laneCount, { armLength 
     laneWidth: laneW,
   });
   const splitU = type === 'slip' ? slipSplitU : nearSplitU;
-  const sourceAnchor = fromG.wp(splitU, fromG.outOuterS);
-  const sourceNear = fromG.wp(turnU, fromG.outOuterS - bundleWidth / 2);
-  const targetNear = toG.wp(turnU, toG.inOuterS - bundleWidth / 2);
+  // The branch is a lane: its centreline connects to the pre-split dedicated
+  // lane's centreline (bundle centre), not to the mainline's outer boundary.
+  // Pavement is derived from that centreline by offsetting the lane width.
+  const sourceAnchor = fromG.wp(splitU, fromG.outOuterS + bundleWidth / 2);
   const targetAnchor = toG.wp(targetMergeU, toG.inOuterS - bundleWidth / 2);
-  const turnChord = len(sub(sourceNear, targetNear));
+  const turnChord = len(sub(targetAnchor, sourceAnchor));
   if (turnChord < 2) return null;
-  const turnHandle = Math.min(18, Math.max(4.5, turnChord * 0.39));
-  const sourceHandle = Math.min(10, Math.max(3, len(sub(sourceAnchor, sourceNear)) * 0.42));
+  // One continuously curved split connector: start tangent runs parallel to the
+  // mainline (toward the core), end tangent runs parallel to the target arm
+  // (departing). A single cubic Bézier holds both end tangents while turning
+  // smoothly midway, replacing the old "straight run + arc" hard join.
+  const handle = Math.min(24, Math.max(3.5, turnChord * 0.38));
+  const startDir = { x: -fromG.fwd.x, y: -fromG.fwd.y };
+  const c1 = add(sourceAnchor, scl(startDir, handle));
+  const c2 = add(targetAnchor, scl(toG.fwd, -handle));
   const path = [sourceAnchor];
-  appendCubic2(
-    path,
-    sourceAnchor, add(sourceAnchor, scl(fromG.fwd, -sourceHandle)),
-    add(sourceNear, scl(fromG.fwd, sourceHandle)), sourceNear, 8,
-  );
-  const sourceTaperEnd = path.length - 1;
-  appendCubic2(
-    path,
-    sourceNear, add(sourceNear, scl(fromG.fwd, -turnHandle)),
-    add(targetNear, scl(toG.fwd, -turnHandle)), targetNear, 14,
-  );
-  const turnEnd = path.length - 1;
-  for (let index = 1; index <= 6; index += 1) path.push(lerp2(targetNear, targetAnchor, index / 6));
-  const offsets = taperedOffsetPath(path, bundleWidth / 2, (i) => Math.min(1, i / sourceTaperEnd));
-  const guideInner = offsets.right.slice(sourceTaperEnd, turnEnd + 1);
-  const guideApex = lineIntersect(
-    guideInner[0], add(guideInner[0], scl(fromG.fwd, -1)),
-    guideInner[guideInner.length - 1], add(guideInner[guideInner.length - 1], scl(toG.fwd, -1)),
-  ) ?? lerp2(guideInner[0], guideInner[guideInner.length - 1], 0.5);
+  appendCubic2(path, sourceAnchor, c1, c2, targetAnchor, 30);
+  // The branch keeps a constant lane width along its whole centreline. The
+  // channelized gore island (guide triangle) separates it from the through road
+  // at the split, so the pavement never tapers to a needle nose.
+  const sourceTaperEnd = Math.max(2, Math.round(path.length * 0.32));
+  const offsets = offsetPolyline(path, bundleWidth / 2);
+  // Guide island (导流区) = the closed region between the right-turn lane and the
+  // intersection corner, bounded by four edges:
+  //   - the lane's left line        = the branch's inner edge (offsets.right)
+  //   - part of the inbound through edge on the source arm
+  //   - part of the outbound through edge on the target arm
+  //   - a smooth corner curve joining the two through edges around the corner
+  // The two arm edges and the corner together form the "intersection" side, and
+  // the loop closes at the split (gore) and where the branch re-joins the target.
+  const sIn = fromG.outOuterS + bundleWidth;   // branch/through boundary on the source arm
+  const sOut = toG.inOuterS - bundleWidth;     // merge boundary on the target arm
+  const guideBranch = offsets.right;                          // source split -> target merge
+  const guideViaOut = edgeLine(toG, targetMergeU, toG.R, sOut, 3);    // merge -> target corner
+  const guideCorner = fillet(toG.wp(toG.R, sOut), scl(toG.fwd, -1), fromG.wp(fromG.R, sIn), fromG.fwd, 14); // smooth corner
+  const guideViaIn = edgeLine(fromG, fromG.R, splitU, sIn, 3);         // source corner -> split
+  const guidePoly = [
+    ...guideBranch,
+    ...guideViaOut,
+    toG.wp(toG.R, sOut),
+    ...guideCorner,
+    fromG.wp(fromG.R, sIn),
+    ...guideViaIn,
+  ];
   return {
     type, path, offsets, lanePaths: offsetLanePaths(path, laneCount, laneW),
-    sourceAnchor, targetAnchor, sourceTaperEnd, turnEnd,
+    sourceAnchor, targetAnchor, sourceTaperEnd, turnEnd: offsets.right.length - 1,
     outerBoundary: offsets.left, innerBoundary: offsets.right,
-    guideInner, guideApex,
+    guidePoly,
+    guideInner: offsets.right, guideApex: offsets.right[0],
     splitU, turnU, targetMergeU, bundleWidth, sourceTaperEnd,
   };
 }

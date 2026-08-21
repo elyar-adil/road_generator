@@ -15,7 +15,7 @@ import {
   v2, add, sub, scl, len, lerp2,
   fillet, polylineLength, pointAndTangentAtDistance, offsetPolyline,
   buildDashedSegments, buildLeftTurnPath, trimPolyline,
-  rayBoundaryIntersect, pointInRing,
+  rayBoundaryIntersect, pointInRing, edgeLine,
 } from './geometry.js';
 import { trimBeforeLaneEnvelope } from './waiting-area.js';
 import { armLaneMovementSets, leftTurnCapacity } from './road-movements.js';
@@ -293,23 +293,26 @@ function roundedGuideCorner(previous, corner, next, radius, segments = 4) {
   return points;
 }
 
-// Guide-area polygon from the facility's inner curve + apex, rounded.
+// Guide-area polygon from the facility's closed boundary (branch inner edge +
+// through edges + corner curve), with the two sharp gore/merge corners rounded.
 export function guideArea(facility) {
-  const { guideInner, guideApex } = facility.data;
-  if (!guideInner || guideInner.length < 3) return null;
-  const sourceCorner = roundedGuideCorner(guideApex, guideInner[0], guideInner[1], 1.35);
-  const targetCorner = roundedGuideCorner(guideInner.at(-2), guideInner.at(-1), guideApex, 1.35);
-  const apexCorner = roundedGuideCorner(guideInner.at(-1), guideApex, guideInner[0], 1.5);
-  return [
-    ...sourceCorner,
-    ...guideInner.slice(1, -1),
-    ...targetCorner,
-    ...apexCorner,
-  ];
+  const poly = facility.data.guidePoly;
+  if (!poly || poly.length < 3) return null;
+  const rounded = [];
+  for (let i = 0; i < poly.length; i += 1) {
+    const prev = poly[(i - 1 + poly.length) % poly.length];
+    const curr = poly[i];
+    const next = poly[(i + 1) % poly.length];
+    rounded.push(...roundedGuideCorner(prev, curr, next, 1.2));
+  }
+  return rounded;
 }
 
 // Chevron legs inside a guide area. Each V tip points along the adjacent lane
 // flow; legs land on the two boundary edges so the pattern follows the wedge.
+// `guideInner` is the right-turn branch's inner edge and `guidePoints` the closed
+// island ring; the chevrons span across the island to the opposite (through/corner)
+// edge, pointing inward (toward the turn's inner side).
 export function guideChevrons(guideInner, guideApex, guidePoints) {
   if (guideInner.length < 3 || !guidePoints || guidePoints.length < 3) return [];
   const lineWidth = 0.35;
@@ -321,8 +324,7 @@ export function guideChevrons(guideInner, guideApex, guidePoints) {
     if (!pose) break;
     const guidePoint = pose.point;
     const tangent = pose.tangent;
-    let across = v2(-tangent.y, tangent.x);
-    if (across.x * (guideApex.x - guidePoint.x) + across.y * (guideApex.y - guidePoint.y) < 0) across = scl(across, -1);
+    const across = scl(v2(tangent.y, -tangent.x), 1);
     const outerPoint = rayBoundaryIntersect(guidePoint, across, guidePoints, true);
     const width = outerPoint ? len(sub(outerPoint, guidePoint)) : 0;
     let forward = Math.min(width * 0.5, Math.max(0.35, total - 0.3 - distance));
@@ -587,17 +589,16 @@ export function deriveRoadScene(model, state, random = Math.random, topology = n
     const rightFacility = rightFacilities[j];
     const d = rightFacility && rightFacility.type !== 'direct' ? rightFacility.data : null;
     const bypassesCorner = d && rightFacility.target === gi;
-    // When a channelized branch curves around this corner, the sidewalk must
-    // stay outside every carriageway: run along arm i's outer edge to the merge
-    // point, follow the branch's outer boundary (skipping its zero-width taper
-    // nose, which hugs the through lane), then back along arm j's outer edge.
+    // The sidewalk strip is derived from the road's outer curb line (pavement
+    // boundary), never drawn as its own shape: whichever carriageway hugs this
+    // corner - the fillet, or a channelized branch that curves around it - is the
+    // single source the curb follows, so any change to the road shape (curve,
+    // width, merge/split position) propagates to the sidewalk automatically.
     const path = bypassesCorner
       ? [
-          gi.farLeft,
-          gi.wp(d.targetMergeU, gi.inOuterS),
-          ...d.outerBoundary.slice(d.sourceTaperEnd).reverse(),
-          gj.wp(d.splitU, gj.outOuterS),
-          gj.farRight,
+          ...edgeLine(gi, cfg.armLength, d.targetMergeU, gi.inOuterS, 3),
+          ...d.outerBoundary.slice().reverse(),
+          ...edgeLine(gj, d.splitU, cfg.armLength, gj.outOuterS, 3),
         ]
       : [gi.farLeft, gi.nearLeft, ...filletPts[i], gj.nearRight, gj.farRight];
     if (state.showSidewalk) scene.sidewalks.push({ path, width: state.sidewalkWidth, offset: 0.32 + state.sidewalkWidth / 2 });
