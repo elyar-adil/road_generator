@@ -364,7 +364,7 @@ export function rightTurnFacilityData(facility, fromG, toG, cfg) {
     };
   }
 
-  const { offsets, innerBoundary, sourceTaperEnd, turnEnd, splitU, turnU, targetMergeU, bundleWidth } = data;
+  const { offsets, innerBoundary, sourceTaperEnd, turnEnd, splitU, turnU, targetMergeU, bundleWidth, separation = 0 } = data;
   const surface = offsets.left.concat(offsets.right.slice().reverse());
   const dividers = [];
   for (let lane = 1; lane < data.lanePaths.length; lane += 1) {
@@ -381,7 +381,7 @@ export function rightTurnFacilityData(facility, fromG, toG, cfg) {
   return {
     type, direct: false, laneCount,
     surface, dividers,
-    entryDashes: armDashes(fromG, turnU, splitU, fromG.outOuterS + bundleWidth, cfg),
+    entryDashes: armDashes(fromG, turnU, splitU, fromG.outOuterS + bundleWidth - separation, cfg),
     mergeDashes: armDashes(toG, turnU, targetMergeU, toG.inOuterS - bundleWidth, cfg),
     innerBoundarySegments,
     guidePoly, guideChevronLegs,
@@ -499,7 +499,7 @@ export function deriveRoadScene(model, state, random = Math.random, topology = n
         ? Math.max(sideRailStart, rightFacility.data.splitU + 0.5)
         : sideRailStart;
       const rightRailLateral = rightFacility && rightFacility.type !== 'direct'
-        ? g.outOuterS - rightFacility.data.bundleWidth - 0.22
+        ? g.outOuterS - rightFacility.data.bundleWidth - (rightFacility.data.separation || 0) - 0.22
         : g.outOuterS - 0.22;
       scene.guardrails.push(guardrailAlongArm(g, rightRailStart, sideRailEnd, rightRailLateral, 0.12, 0.82));
     }
@@ -598,7 +598,7 @@ export function deriveRoadScene(model, state, random = Math.random, topology = n
       ? [
           ...edgeLine(gi, cfg.armLength, d.targetMergeU, gi.inOuterS, 3),
           ...d.outerBoundary.slice().reverse(),
-          ...edgeLine(gj, d.splitU, cfg.armLength, gj.outOuterS, 3),
+          ...edgeLine(gj, d.splitU, cfg.armLength, gj.outOuterS - (d.separation || 0), 3),
         ]
       : [gi.farLeft, gi.nearLeft, ...filletPts[i], gj.nearRight, gj.farRight];
     if (state.showSidewalk) scene.sidewalks.push({ path, width: state.sidewalkWidth, offset: 0.32 + state.sidewalkWidth / 2 });

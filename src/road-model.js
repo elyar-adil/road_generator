@@ -137,7 +137,10 @@ function createRightTurnFacility(fromG, toG, cfg) {
   const laneCount = rightTurnLaneCapacity(fromG.arm, toG);
   if (!laneCount) return null;
   const type = fromG.arm.rightTurnType;
-  const data = buildRightTurnPathData(fromG, toG, type, laneCount, { armLength: cfg.armLength });
+  const data = buildRightTurnPathData(fromG, toG, type, laneCount, {
+    armLength: cfg.armLength,
+    rightTurnMode: fromG.arm.rightTurnMode,
+  });
   return data ? { type, laneCount, data, target: toG } : null;
 }
 

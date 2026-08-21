@@ -60,6 +60,58 @@ export function fillet(p0, edge0dir, p1, edge1dir, segN) {
   return pts;
 }
 
+// Vehicle swept-turn: a constant-curvature (circular arc) transition from an
+// approaching tangent line to a departing tangent line, with straight lead-in
+// and lead-out runs that keep entry/exit colinear. This reproduces how a turning
+// vehicle sweeps through a corner or across a junction (fixed turn radius),
+// unlike a geometric Bezier whose curvature varies arbitrarily.
+//
+//   pA, dirA : start point + unit approach direction (pointing INTO the corner)
+//   pB, dirB : end   point + unit departure direction (pointing AWAY, out)
+//   radius   : design turning radius (the vehicle's swept arc radius)
+//
+// Returns a polyline [pA -> tangentA -> arc tangentA..tangentB -> tangentB -> pB]
+// or null when the two tangents are (near-)parallel or the radius cannot fit.
+export function sweptTurn(pA, dirA, pB, dirB, radius, segN = 16) {
+  const u = normalize(dirA), v = normalize(dirB);
+  const nu = leftNormal(u), nv = leftNormal(v);
+  let best = null;
+  const pick = (s1, s2) => {
+    const aO = add(pA, scl(nu, s1 * radius));
+    const bO = add(pB, scl(nv, s2 * radius));
+    const C = lineIntersect(aO, add(aO, u), bO, add(bO, v));
+    if (!C) return;
+    const t1 = dot(sub(C, pA), u);
+    const tA = add(pA, scl(u, t1));
+    const t2 = dot(sub(C, pB), v);
+    const tB = add(pB, scl(v, t2));
+    // Travel validity: tangency ahead of the approach, behind the departure.
+    if (t1 <= 0.5 || t2 >= -0.5) return;
+    const rA = len(sub(C, tA)), rB = len(sub(C, tB));
+    if (Math.abs(rA - radius) > radius * 0.4 || Math.abs(rB - radius) > radius * 0.4) return;
+    best = { C, tA, tB };
+  };
+  pick(1, 1); pick(1, -1); pick(-1, 1); pick(-1, -1);
+  if (!best) return null;
+  const { C, tA, tB } = best;
+  const startAng = Math.atan2(tA.y - C.y, tA.x - C.x);
+  const endAng = Math.atan2(tB.y - C.y, tB.x - C.x);
+  // Shortest signed arc from approach tangent to departure tangent (the vehicle
+  // turns through <180°), taking the direction that leads from startAng to
+  // endAng. This yields the minor quarter-arc for left/right turns.
+  let sweep = endAng - startAng;
+  while (sweep > Math.PI) sweep -= Math.PI * 2;
+  while (sweep < -Math.PI) sweep += Math.PI * 2;
+  // Straight lead-in from pA to tA, then arc, then straight lead-out tB to pB.
+  const path = [cloneV(pA), cloneV(tA)];
+  for (let i = 1; i < segN; i += 1) {
+    const a = startAng + sweep * i / segN;
+    path.push(v2(C.x + radius * Math.cos(a), C.y + radius * Math.sin(a)));
+  }
+  path.push(cloneV(tB), cloneV(pB));
+  return path;
+}
+
 export function polylineLength(path) {
   let total = 0;
   for (let i = 1; i < path.length; i += 1) total += distance(path[i - 1], path[i]);

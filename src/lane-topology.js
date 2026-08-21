@@ -8,7 +8,7 @@
 // testable and reusable.
 
 import { classifyMovement, armLaneMovementSets } from './road-movements.js';
-import { add, scl, sub, len, appendCubic2, pointInRing } from './geometry.js';
+import { add, scl, sub, len, appendCubic2, pointInRing, sweptTurn } from './geometry.js';
 
 // Which inbound lane index carries each movement type (median-side inside).
 // `lanes` is the per-lane Set<movement> from laneMovementSets.
@@ -40,13 +40,23 @@ export function inboundToOutboundLane(fromIndex, laneIn, laneOut, movement) {
 }
 
 // Cubic connector between two lane centres (source approaching, target leaving).
-// This generic turn curve is the same primitive used by right-turn generation
-// and later interchange ramps, scaled by chord length.
+// Turning lanes prefer a vehicle swept-turn arc (constant turn radius that grows
+// with the lane's lateral offset, so parallel turning lanes stay distinct);
+// straight-through moves fall back to a gentle cubic lead.
 export function connectLanePath(fromG, fromS, toG, toS, { station = 0.5 } = {}) {
   const fromP = fromG.wp(fromG.R + station, fromS);
   const toP = toG.wp(toG.R + station, toS);
   const fromDir = scl(fromG.fwd, -1);
   const toDir = toG.fwd;
+  const crossed = classifyMovement(fromG, toG);
+  if (crossed.type === 'left' || crossed.type === 'right') {
+    // Design turn radius grows with the lane's distance from the median so outer
+    // lanes sweep wider arcs without merging into their neighbours.
+    const outerR = Math.max(0, Math.abs(fromS)) || 0;
+    const radius = Math.min(22, Math.max(5, 5.5 + outerR * 0.55));
+    const swept = sweptTurn(fromP, fromDir, toP, toDir, radius, 24);
+    if (swept && swept.length >= 8) return swept;
+  }
   const dist = len(sub(toP, fromP)) || 1;
   const handle = Math.max(3, Math.min(dist * 0.35, 16));
   const c1 = add(fromP, scl(fromDir, handle));
