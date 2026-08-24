@@ -23,6 +23,24 @@ describe('project state', () => {
     expect(result.project.arms.every((arm) => ['planted', 'hatched'].includes(arm.rightTurnIsland))).toBe(true);
   });
 
+  it('sanitizes the junction type with cross as default', () => {
+    expect(createDefaultProject().junctionType).toBe('cross');
+    expect(sanitizeProject({ junctionType: 'roundabout' }).junctionType).toBe('roundabout');
+    expect(sanitizeProject({ junctionType: 'cloverleaf' }).junctionType).toBe('cross');
+    expect(sanitizeProject({}).junctionType).toBe('cross');
+  });
+
+  it('warns when roundabout mode carries signal-only facilities', () => {
+    const base = {
+      ...createDefaultProject(),
+      arms: createDefaultProject().arms.map((arm) => ({ ...arm, waitingArea: 'left' })),
+    };
+    const cross = validateProject({ ...base, junctionType: 'cross' });
+    const roundabout = validateProject({ ...base, junctionType: 'roundabout' });
+    expect(roundabout.warnings.some((w) => w.includes('环岛'))).toBe(true);
+    expect(cross.warnings.some((w) => w.includes('环岛'))).toBe(false);
+  });
+
   it('normalizes imported numeric values and flags overlapping arms', () => {
     const project = sanitizeProject({
       arms: [

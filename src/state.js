@@ -4,6 +4,7 @@ export const PROJECT_FORMAT = 'intersection-studio';
 export const PROJECT_VERSION = 3;
 
 export const CENTER_MODES = new Set(['planted', 'doubleYellowRail', 'doubleYellow']);
+export const JUNCTION_TYPES = new Set(['cross', 'roundabout']);
 export const WAITING_AREA_TYPES = new Set(['none', 'left', 'straight']);
 export const RIGHT_ISLAND_TYPES = new Set(['planted', 'hatched']);
 export const RIGHT_TURN_TYPES = new Set(['none', 'direct', 'split', 'slip']);
@@ -95,6 +96,7 @@ export function createDefaultProject() {
   }
   return {
     projectName: '城市十字路口',
+    junctionType: 'cross',
     arms: clone(DEFAULT_ARMS).map((arm) => ({
       ...arm,
       rightTurnType: rightTurnTypes[arm.angle / 90 % rightTurnTypes.length],
@@ -144,6 +146,7 @@ export function sanitizeProject(value) {
 
   return {
     projectName: String(source.projectName ?? defaults.projectName).trim().slice(0, 40) || '未命名路口',
+    junctionType: JUNCTION_TYPES.has(source.junctionType) ? source.junctionType : defaults.junctionType,
     arms: arms.length >= 2 ? arms : defaults.arms,
     laneWidth: Math.round(clamp(finite(source.laneWidth, defaults.laneWidth), 2.6, 4.2) * 20) / 20,
     intersectionSize,
@@ -231,6 +234,10 @@ export function validateProject(value) {
 
   if (!project.showLights && project.arms.length > 4) {
     warnings.push('复杂多岔路口建议启用交通信号');
+  }
+
+  if (project.junctionType === 'roundabout' && project.arms.some((arm) => arm.waitingArea !== 'none')) {
+    warnings.push('环岛模式不生成信号灯与待转区标线');
   }
 
   const widestRoad = Math.max(...project.arms.map((arm) => {

@@ -17,6 +17,7 @@ import {
   fillet, lineIntersect,
 } from './geometry.js';
 import { createStraightFrame } from './frame.js';
+import { computeRoundaboutLayout } from './roundabout.js';
 
 // Cross-section geometry of a road given lane counts / widths / radius.
 //
@@ -152,12 +153,20 @@ function createRightTurnFacility(fromG, toG, cfg) {
 
 // Build the layer-1 road model from the project config.
 //
+// Two node kinds share this entry point:
+//   - 'cross' (default): radial arms + central polygon + corner fillets, with
+//     per-arm channelized right-turn facilities.
+//   - 'roundabout': arms truncate at the inscribed circle; the circulating
+//     carriageway, central island and splitter islands replace the core
+//     polygon. No signal-driven facilities are produced.
+//
 // Returns:
 //   geoms:           per-road geometry descriptors (index == sorted arm order)
-//   availPerArm:     per-road Set of reachable movement types
+//   availPerArm:     per-road Set of reachable movement types ('cross' only)
 //   leftTargets / straightTargets / rightTargets: per-road target geoms
 //   rightFacilities: per-road channelized right-turn branch, or null
 //   filletPts:       corner fillet polylines between adjacent roads
+//   roundabout:      { inscribedR, circWidth, islandR } ('roundabout' only)
 export function buildRoadModel(state) {
   const cfg = {
     laneWidth: state.laneWidth,
@@ -166,6 +175,33 @@ export function buildRoadModel(state) {
     filletSeg: state.filletSeg,
   };
   const arms = state.arms.slice().sort((a, b) => a.angle - b.angle);
+
+  if (state.junctionType === 'roundabout') {
+    const roundabout = computeRoundaboutLayout({
+      arms, laneWidth: cfg.laneWidth, intersectionSize: cfg.intersectionSize,
+    });
+    const geoms = arms.map((arm) => armGeometry(arm, cfg));
+    updateArmRadii(geoms, cfg);
+    // Arms reach the circulatory carriageway: floor R at the inscribed circle
+    // (small overlap so pavement joints stay sealed).
+    geoms.forEach((g) => {
+      g.R = Math.min(cfg.armLength - 5, Math.max(g.R, roundabout.inscribedR + 0.25));
+      g.nearLeft = g.wp(g.R, g.inOuterS);
+      g.nearRight = g.wp(g.R, g.outOuterS);
+      g.nearMedL = g.wp(g.R, g.medW / 2);
+      g.nearMedR = g.wp(g.R, -g.medW / 2);
+      g.leftR = g.R;
+      g.rightR = g.R;
+    });
+    return {
+      geoms,
+      availPerArm: [], leftTargets: [], straightTargets: [],
+      rightTargets: [], rightFacilities: geoms.map(() => null),
+      filletPts: geoms.map(() => []),
+      cfg, roundabout,
+    };
+  }
+
   const geoms = arms.map((arm) => armGeometry(arm, cfg));
   updateArmRadii(geoms, cfg);
   updateCornerTrims(geoms, cfg);

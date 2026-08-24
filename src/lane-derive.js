@@ -20,6 +20,11 @@ import {
 import { trimBeforeLaneEnvelope } from './waiting-area.js';
 import { armLaneMovementSets, leftTurnCapacity } from './road-movements.js';
 import { buildCornerFillets } from './road-model.js';
+import {
+  annulusSectorQuads,
+  circlePolygon,
+  splitterIsland,
+} from './roundabout.js';
 
 // ---------------------------------------------------------------------------
 // Arrow outlines (design spec, units cm; local frame [lateral, forward]).
@@ -413,11 +418,8 @@ export function guardrailAlongArm(g, uStart, uEnd, lateral, yBottom = 0.02, heig
 //
 // Returns a plain data object consumed by the render layer.
 // ---------------------------------------------------------------------------
-export function deriveRoadScene(model, state, random = Math.random, topology = null) {
-  const { geoms, rightFacilities, rightTargets, leftTargets, straightTargets } = model;
-  const cfg = model.cfg;
-  const n = geoms.length;
-  const scene = {
+function createEmptyScene() {
+  return {
     roadSurfaces: [],
     medianIslands: [],
     yellowLines: [],
@@ -441,6 +443,14 @@ export function deriveRoadScene(model, state, random = Math.random, topology = n
     buildings: [],
     trees: [],
   };
+}
+
+export function deriveRoadScene(model, state, random = Math.random, topology = null) {
+  if (state.junctionType === 'roundabout') return deriveRoundaboutScene(model, state, random);
+  const { geoms, rightFacilities, rightTargets, leftTargets, straightTargets } = model;
+  const cfg = model.cfg;
+  const n = geoms.length;
+  const scene = createEmptyScene();
 
   // ---- per-arm road surfaces, medians, markings, arrows, crossing ----
   geoms.forEach((g, i) => {
@@ -662,38 +672,176 @@ export function deriveRoadScene(model, state, random = Math.random, topology = n
   }
 
   // ---- buildings + trees scattered outside the road envelope ----
-  if (state.showBuildings) {
-    const blocked = (p) => {
-      for (const g of geoms) {
-        const u = p.x * g.fwd.x + p.y * g.fwd.y;
-        const s = p.x * g.left.x + p.y * g.left.y;
-        if (u > -6 && u < cfg.armLength + 14 && Math.abs(s) < Math.max(g.inOuterS, -g.outOuterS) + 7 + state.sidewalkWidth) return true;
-      }
-      return false;
-    };
-    const buildingColors = [0x6b6f76, 0x7a6a5c, 0x5c6a78, 0x716357, 0x60686f];
-    let placed = 0, tries = 0;
-    while (placed < 12 && tries < 400) {
-      tries += 1;
-      const ang = random() * Math.PI * 2;
-      const rad = cfg.armLength + 10 + random() * 45;
-      const p = v2(Math.cos(ang) * rad, Math.sin(ang) * rad);
-      if (blocked(p)) continue;
-      const w = 5 + random() * 9, d = 5 + random() * 9, h = 4 + random() * 22;
-      scene.buildings.push({ pos: p, w, d, h, rot: random() * Math.PI * 2, color: buildingColors[Math.floor(random() * buildingColors.length)] });
-      placed += 1;
+  if (state.showBuildings) scatterScenery(scene, geoms, cfg, state, random);
+
+  return scene;
+}
+
+// Buildings + trees rejection-placed outside every road's carriageway envelope.
+function scatterScenery(scene, geoms, cfg, state, random) {
+  const blocked = (p) => {
+    for (const g of geoms) {
+      const u = p.x * g.fwd.x + p.y * g.fwd.y;
+      const s = p.x * g.left.x + p.y * g.left.y;
+      if (u > -6 && u < cfg.armLength + 14 && Math.abs(s) < Math.max(g.inOuterS, -g.outOuterS) + 7 + state.sidewalkWidth) return true;
     }
-    let tPlaced = 0, tTries = 0;
-    while (tPlaced < 16 && tTries < 300) {
-      tTries += 1;
-      const ang = random() * Math.PI * 2;
-      const rad = cfg.armLength * 0.55 + random() * (cfg.armLength * 0.6);
-      const p = v2(Math.cos(ang) * rad, Math.sin(ang) * rad);
-      if (blocked(p)) continue;
-      scene.trees.push({ pos: p });
-      tPlaced += 1;
-    }
+    return false;
+  };
+  const buildingColors = [0x6b6f76, 0x7a6a5c, 0x5c6a78, 0x716357, 0x60686f];
+  let placed = 0, tries = 0;
+  while (placed < 12 && tries < 400) {
+    tries += 1;
+    const ang = random() * Math.PI * 2;
+    const rad = cfg.armLength + 10 + random() * 45;
+    const p = v2(Math.cos(ang) * rad, Math.sin(ang) * rad);
+    if (blocked(p)) continue;
+    const w = 5 + random() * 9, d = 5 + random() * 9, h = 4 + random() * 22;
+    scene.buildings.push({ pos: p, w, d, h, rot: random() * Math.PI * 2, color: buildingColors[Math.floor(random() * buildingColors.length)] });
+    placed += 1;
   }
+  let tPlaced = 0, tTries = 0;
+  while (tPlaced < 16 && tTries < 300) {
+    tTries += 1;
+    const ang = random() * Math.PI * 2;
+    const rad = cfg.armLength * 0.55 + random() * (cfg.armLength * 0.6);
+    const p = v2(Math.cos(ang) * rad, Math.sin(ang) * rad);
+    if (blocked(p)) continue;
+    scene.trees.push({ pos: p });
+    tPlaced += 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Roundabout node derivation.
+//
+// Arms keep their approach cross-section (medians, lane lines, guardrails)
+// but truncate at the inscribed circle; the circulating carriageway annulus,
+// central island and per-arm splitter islands replace the signal-controlled
+// core. No stop lines / signals / arrows are produced.
+// ---------------------------------------------------------------------------
+
+// Station where a straight arm edge at lateral offset s meets |p| = radius
+// (arms radiate from the origin: u² + s² = r²). Falls back to u=0 when the
+// edge never reaches that radius.
+function armEdgeStation(g, s, radius) {
+  const u2 = radius * radius - s * s;
+  return u2 > 1 ? Math.sqrt(u2) : 0;
+}
+
+// CCW arc polyline on the origin circle between two absolute angles.
+function arcPath(radius, angleFrom, angleTo) {
+  const count = Math.max(4, Math.ceil(Math.abs(angleTo - angleFrom) / 0.12));
+  const pts = [];
+  for (let k = 0; k <= count; k += 1) {
+    const a = angleFrom + (angleTo - angleFrom) * k / count;
+    pts.push(v2(radius * Math.cos(a), radius * Math.sin(a)));
+  }
+  return pts;
+}
+
+export function deriveRoundaboutScene(model, state, random = Math.random) {
+  const { geoms, roundabout } = model;
+  if (!roundabout) throw new Error('roundabout scene requires a roundabout road model');
+  const cfg = model.cfg;
+  const n = geoms.length;
+  const scene = createEmptyScene();
+
+  geoms.forEach((g) => {
+    const arm = g.arm;
+    if (arm.laneIn <= 0 && arm.laneOut <= 0) return;
+    const facilityStart = g.R + 0.5;
+
+    // approach pavement up to the circulatory carriageway
+    scene.roadSurfaces.push([
+      g.wp(g.R, g.inOuterS), g.wp(cfg.armLength, g.inOuterS),
+      g.wp(cfg.armLength, g.outOuterS), g.wp(g.R, g.outOuterS),
+    ]);
+
+    // center separation on the approach (identical rules to cross nodes)
+    if (arm.centerMode === 'planted' && g.medW > 0.15) {
+      const top = medianIslandTop(g, facilityStart, cfg);
+      if (top) scene.medianIslands.push(top);
+    } else if (arm.laneIn > 0 && arm.laneOut > 0
+        && (arm.centerMode === 'doubleYellow' || arm.centerMode === 'doubleYellowRail')) {
+      scene.yellowLines.push([g.wp(facilityStart, 0.1), g.wp(cfg.armLength, 0.1)]);
+      scene.yellowLines.push([g.wp(facilityStart, -0.1), g.wp(cfg.armLength, -0.1)]);
+      if (arm.centerMode === 'doubleYellowRail') {
+        scene.guardrails.push(guardrailAlongArm(g, facilityStart + 0.7, cfg.armLength - 0.7, 0, 0.02, 0.78));
+      }
+    }
+
+    // longitudinal lane lines + outer edge lines
+    const drawLaneLines = (count, sign) => {
+      for (let k = 1; k < count; k += 1) {
+        const s = sign * (g.medW / 2 + k * g.laneW);
+        armDashes(g, g.R + 1.2, cfg.armLength - 1, s, cfg).forEach((seg) => scene.laneDashes.push(seg));
+      }
+      if (count > 0) {
+        const sOuter = sign * (g.medW / 2 + count * g.laneW - 0.1);
+        scene.laneEdges.push([g.wp(g.R + 0.6, sOuter), g.wp(cfg.armLength, sOuter)]);
+      }
+    };
+    drawLaneLines(arm.laneIn, -1);
+    drawLaneLines(arm.laneOut, 1);
+
+    // side guardrails (no channelized branches on roundabouts)
+    const sideRailStart = g.R + 1.2;
+    const sideRailEnd = cfg.armLength - 0.7;
+    if (arm.leftGuardrail) {
+      scene.guardrails.push(guardrailAlongArm(g, sideRailStart, sideRailEnd, g.inOuterS + 0.22, 0.12, 0.82));
+    }
+    if (arm.rightGuardrail) {
+      scene.guardrails.push(guardrailAlongArm(g, sideRailStart, sideRailEnd, g.outOuterS - 0.22, 0.12, 0.82));
+    }
+  });
+
+  // circulating carriageway + central island
+  annulusSectorQuads({ x: 0, y: 0 }, roundabout.islandR, roundabout.inscribedR, 64)
+    .forEach((quad) => scene.roadSurfaces.push(quad));
+  scene.medianIslands.push(circlePolygon({ x: 0, y: 0 }, roundabout.islandR, 64));
+
+  // splitter islands between entry and exit of each armed approach
+  geoms.forEach((g) => {
+    if (g.arm.laneIn <= 0 && g.arm.laneOut <= 0) return;
+    scene.guideAreas.push({
+      pts: splitterIsland(g.arm.angle, roundabout.islandR, roundabout.inscribedR, 1.2, 3),
+      planted: true,
+    });
+    // street lamp just past the splitter island nose
+    const dirOut = v2(Math.cos(g.arm.angle * Math.PI / 180), Math.sin(g.arm.angle * Math.PI / 180));
+    const noseR = roundabout.inscribedR + 3;
+    scene.streetLamps.push({
+      pos: scl(dirOut, noseR + 1.6 + state.sidewalkWidth * 0.6),
+      dir: dirOut,
+    });
+  });
+
+  // sidewalk bands + curbs wrap each gap: down one approach's outer edge,
+  // around the circulatory carriageway, out along the neighbour's far edge.
+  for (let i = 0; i < n; i += 1) {
+    const j = (i + 1) % n;
+    const gi = geoms[i], gj = geoms[j];
+    const leftCrossU = armEdgeStation(gi, gi.inOuterS, roundabout.inscribedR);
+    const rightCrossU = armEdgeStation(gj, gj.outOuterS, roundabout.inscribedR);
+    const angleFrom = Math.atan2(
+      gi.wp(leftCrossU, gi.inOuterS).y, gi.wp(leftCrossU, gi.inOuterS).x,
+    );
+    let angleTo = Math.atan2(
+      gj.wp(rightCrossU, gj.outOuterS).y, gj.wp(rightCrossU, gj.outOuterS).x,
+    );
+    if (angleTo <= angleFrom) angleTo += Math.PI * 2;
+    const path = [
+      gi.farLeft,
+      gi.wp(leftCrossU, gi.inOuterS),
+      ...arcPath(roundabout.inscribedR, angleFrom, angleTo),
+      gj.wp(rightCrossU, gj.outOuterS),
+      gj.farRight,
+    ];
+    if (state.showSidewalk) scene.sidewalks.push({ path, width: state.sidewalkWidth, offset: 0.32 + state.sidewalkWidth / 2 });
+    for (let k = 0; k < path.length - 1; k += 1) scene.curbs.push([path[k], path[k + 1]]);
+  }
+
+  if (state.showBuildings) scatterScenery(scene, geoms, cfg, state, random);
 
   return scene;
 }

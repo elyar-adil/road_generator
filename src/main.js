@@ -374,7 +374,14 @@ function regenerate(){
   lampSets.forEach((lamps) => trafficLights.push({ lamps }));
 
   gridHelper.visible = state.showGrid;
-  renderTopologyOverlay(model.geoms, model.rightFacilities);
+  if(state.junctionType==='roundabout'){
+    // No lane-level cross topology exists for roundabouts yet.
+    disposeGroup(topologyGroup);
+    topologyGroup.clear();
+    topologyGroup.visible=false;
+  } else {
+    renderTopologyOverlay(model.geoms, model.rightFacilities);
+  }
   buildSegmentDemo();
   updateProjectInsights();
   renderer.shadowMap.needsUpdate=true;
@@ -517,6 +524,13 @@ layerIds.forEach(id=>{
     state[id]=el.checked;
     regenerate();
   });
+});
+
+const junctionTypeSelect=document.getElementById('junctionType');
+junctionTypeSelect.value=state.junctionType;
+junctionTypeSelect.addEventListener('change',()=>{
+  state.junctionType=junctionTypeSelect.value;
+  regenerate();
 });
 
 const gridToggle=document.getElementById('showGrid');
@@ -852,6 +866,7 @@ function syncAllControls(){
     document.getElementById(id+'V').textContent=formatSliderValue(state[key],digits);
   });
   layerIds.forEach(id=>{ document.getElementById(id).checked=Boolean(state[id]); });
+  junctionTypeSelect.value=state.junctionType;
   gridToggle.checked=state.showGrid;
   gridHelper.visible=state.showGrid;
   seedInput.value=state.scenerySeed;
