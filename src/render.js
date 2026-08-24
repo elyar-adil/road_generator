@@ -18,6 +18,7 @@ export const ROAD_THEME = {
   yellow: 0xf2c230,
   poleGray: 0x3a3f46,
   lightHousing: 0x22262b,
+  ground: 0x4c6b3d,
   waitingSurface: 0x343941,
   buildingBase: [0x6b6f76, 0x7a6a5c, 0x5c6a78, 0x716357, 0x60686f],
 };
@@ -33,7 +34,31 @@ export function matStd(color, roughness = 0.9) {
   return matCache.get(key);
 }
 
-function boxAlong(p0, p1, opt) {
+// Emissive materials (street-lamp heads, traffic-light lamps) are shared across
+// every instance: the animation loop drives all lamps in sync, so one material
+// per colour is enough and keeps them out of per-regenerate disposal.
+const glowCache = new Map();
+export function glowMat(color, emissive, intensity, roughness = 0.4) {
+  const key = `g_${color}_${emissive}_${intensity}`;
+  if (!glowCache.has(key)) {
+    glowCache.set(key, new THREE.MeshStandardMaterial({
+      color, emissive, emissiveIntensity: intensity, roughness,
+    }));
+  }
+  return glowCache.get(key);
+}
+
+function lampMaterial(hex) {
+  const key = `lamp_${hex}`;
+  if (!glowCache.has(key)) {
+    glowCache.set(key, new THREE.MeshStandardMaterial({
+      color: hex, emissive: hex, emissiveIntensity: 0, roughness: 0.35,
+    }));
+  }
+  return glowCache.get(key);
+}
+
+export function boxAlong(p0, p1, opt) {
   const dx = p1.x - p0.x, dz = p1.y - p0.y;
   const segLen = Math.hypot(dx, dz);
   if (segLen < 1e-5) return null;
@@ -55,7 +80,7 @@ function boxAlong(p0, p1, opt) {
   return mesh;
 }
 
-function flatPoly(pts2D, y, color, { rough = 0.9 } = {}) {
+export function flatPoly(pts2D, y, color, { rough = 0.9 } = {}) {
   const shapePts = pts2D.map((p) => new THREE.Vector2(p.x, p.y));
   let faces;
   try {
@@ -152,9 +177,7 @@ function buildTrafficLight(theme) {
   housing.position.set(0, 3.9, 0.18);
   housing.castShadow = true;
   group.add(housing);
-  const make = (color) => new THREE.MeshStandardMaterial({
-    color, emissive: color, emissiveIntensity: 0, roughness: 0.35,
-  });
+  const make = (color) => lampMaterial(color);
   const onOff = [0xd0342c, 0xf2c230, 0x2fbf71];
   const lamps = onOff.map((hex) => ({
     mesh: new THREE.Mesh(new THREE.SphereGeometry(0.13, 12, 10), make(hex)),
@@ -325,10 +348,7 @@ export function renderRoadScene(derived, group, theme = ROAD_THEME) {
     arm.rotation.z = Math.PI / 2.6;
     arm.position.set(pos.x + 0.35 * dir.x, 3.5, pos.y + 0.35 * dir.y);
     group.add(arm);
-    const lampMat = new THREE.MeshStandardMaterial({
-      color: 0xfff1c2, emissive: 0xffdd88, emissiveIntensity: 0.9, roughness: 0.4,
-    });
-    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 8), lampMat);
+    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 8), glowMat(0xfff1c2, 0xffdd88, 0.9));
     lamp.position.set(pos.x + 0.75 * dir.x, 3.35, pos.y + 0.75 * dir.y);
     group.add(lamp);
   });

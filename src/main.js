@@ -31,7 +31,7 @@ import { classifyArmMovement } from './road-movements.js';
 import { computeLaneTopology } from './lane-topology.js';
 import { buildRoadModel } from './road-model.js';
 import { deriveRoadScene } from './lane-derive.js';
-import { renderRoadScene, ROAD_THEME } from './render.js';
+import { renderRoadScene, ROAD_THEME, matStd, boxAlong, flatPoly, glowMat } from './render.js';
 import {
   buildLaneTaper, buildSegmentSurface, buildSidewalkBounds,
   laneBundleBounds, placeStreetLights,
@@ -48,15 +48,6 @@ import {
 // ---------------------------------------------------------------- STATE
 let state = sanitizeProject(loadLocalProject() ?? createDefaultProject());
 const history = new ProjectHistory(state);
-
-const COLORS = {
-  asphalt: 0x2c2f36, asphaltEdge:0x24272d,
-  curb:0xb9b2a3, sidewalk:0xa7a196, median:0x6f8a5c,
-  ground:0x4c6b3d, groundEdge:0x3f5931,
-  white:0xf4f4f2, yellow:0xf2c230,
-  poleGray:0x3a3f46, lightHousing:0x22262b,
-  buildingBase:[0x6b6f76,0x7a6a5c,0x5c6a78,0x716357,0x60686f],
-};
 
 // ---------------------------------------------------------------- THREE SETUP
 const container = document.getElementById('canvas-container');
@@ -87,6 +78,9 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+// The scene is static between regenerations (only lamp colours animate), so
+// shadow maps are refreshed manually instead of every frame.
+renderer.shadowMap.autoUpdate = false;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.08;
@@ -110,7 +104,7 @@ scene.add(fillLight);
 
 // ground
 {
-  const g = new THREE.Mesh(new THREE.CircleGeometry(220,64), new THREE.MeshStandardMaterial({color:COLORS.ground, roughness:1}));
+  const g = new THREE.Mesh(new THREE.CircleGeometry(220,64), new THREE.MeshStandardMaterial({color:ROAD_THEME.ground, roughness:1}));
   g.rotation.x = -Math.PI/2;
   g.receiveShadow = true;
   scene.add(g);
@@ -209,67 +203,19 @@ window.addEventListener('resize', ()=>{
 });
 
 // ---------------------------------------------------------------- GEOMETRY HELPERS
-
-function boxAlong(p0,p1,opt,mats){
-  // box whose local X axis spans p0->p1 (extended a bit), offset laterally
-  const dx=p1.x-p0.x, dz=p1.y-p0.y;
-  const segLen = Math.hypot(dx,dz);
-  if(segLen<1e-5) return null;
-  const ang = Math.atan2(dz,dx);
-  const nx = -Math.sin(ang), nz = Math.cos(ang); // left normal
-  const lateral = opt.lateral||0;
-  const extend = opt.extend!==undefined?opt.extend:0.15;
-  const midx = (p0.x+p1.x)/2 + nx*lateral;
-  const midz = (p0.y+p1.y)/2 + nz*lateral;
-  const w = opt.width, h = opt.height, yBottom = opt.yBottom||0;
-  const geo = new THREE.BoxGeometry(segLen+extend, h, w);
-  const mesh = new THREE.Mesh(geo, mats||matStd(opt.color||COLORS.curb, opt.rough));
-  mesh.position.set(midx, yBottom+h/2, midz);
-  mesh.rotation.y = -ang;
-  if(opt.castShadow) mesh.castShadow=true;
-  if(opt.receiveShadow!==false) mesh.receiveShadow=true;
-  return mesh;
-}
-
-const matCache = {};
-function matStd(color, roughness){
-  const key = color+'_'+(roughness===undefined?0.9:roughness);
-  if(!matCache[key]) matCache[key] = new THREE.MeshStandardMaterial({color, roughness:roughness===undefined?0.9:roughness, metalness:0.02, side:THREE.DoubleSide});
-  return matCache[key];
-}
-
-function buildFlatPoly(pts2D, holes, y, color, opts={}){
-  // pts2D: array of {x,y(=world z)}; triangulate via THREE.ShapeUtils
-  const shapePts = pts2D.map(p=> new THREE.Vector2(p.x, p.y));
-  const holeArr = (holes||[]).map(h=> h.map(p=> new THREE.Vector2(p.x,p.y)));
-  let faces;
-  try{ faces = THREE.ShapeUtils.triangulateShape(shapePts, holeArr); }catch(e){ return null; }
-  const allPts = shapePts.concat(...holeArr);
-  const positions = [];
-  allPts.forEach(p=> positions.push(p.x, y, p.y));
-  const indices = [];
-  faces.forEach(f=> indices.push(f[0],f[1],f[2]));
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions,3));
-  geo.setIndex(indices);
-  geo.computeVertexNormals();
-  const mat = matStd(color, opts.rough);
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.receiveShadow = true;
-  return mesh;
-}
+// boxAlong / flatPoly / matStd are shared with the render layer (render.js is
+// the single source for materials and mesh primitives).
 
 // ---------------------------------------------------------------- TOPOLOGY OVERLAY + SEGMENT DEMO
 const MOVEMENT_COLORS = { straight:0x4aa3ff, left:0x37d17a, right:0xff6b4a };
 const LANE_CENTERLINE_COLOR = 0xc3cad6;
 
+// Groups only ever contain geometries to free: every material comes from the
+// shared caches (matStd/glowMat) and is reused across regenerations, so
+// disposing it here would force shader recompiles on the next frame.
 function disposeGroup(group){
   group.traverse(obj=>{
     if(obj.geometry) obj.geometry.dispose();
-    const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
-    materials.filter(Boolean).forEach(material=>{
-      if(!Object.values(matCache).includes(material)) material.dispose();
-    });
   });
 }
 
@@ -312,19 +258,13 @@ function renderTopologyOverlay(geoms, facilities){
 }
 
 function clearWorld(){
-  worldGroup.traverse(obj=>{
-    if(obj.geometry) obj.geometry.dispose();
-    const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
-    materials.filter(Boolean).forEach(material=>{
-      if(!Object.values(matCache).includes(material)) material.dispose();
-    });
-  });
+  disposeGroup(worldGroup);
   worldGroup.clear();
 }
 
 function addStrip(group, centreline, halfWidth, y, color, rough){
   const { ring } = buildSegmentSurface(centreline, halfWidth);
-  const mesh = buildFlatPoly(ring, [], y, color, { rough });
+  const mesh = flatPoly(ring, y, color, { rough });
   if(mesh) group.add(mesh);
   return mesh;
 }
@@ -358,36 +298,36 @@ function buildSegmentDemo(){
   const centreline = Array.from({ length: 151 }, (_, i) => ({ x: i, y: 0 }));
 
   // Main carriageway surface for the full corridor length.
-  addStrip(segmentGroup, centreline, halfWidth, 0.01, COLORS.asphalt, 0.95);
+  addStrip(segmentGroup, centreline, halfWidth, 0.01, ROAD_THEME.asphalt, 0.95);
 
   // 3 -> 2 diverge: the outermost +left lane feathers off x=30..44.
   const diverge = buildLaneTaper({ origin, laneWidth:laneW, splitLanes:1, taperStart:30, taperEnd:44, side:1 });
   // The offset lane continues at constant width beside the corridor x=44..104.
   const offS = sideLateral(inOuterS, laneW);
   const offsetCentre = Array.from({ length: 61 }, (_, i) => ({ x: 44 + i, y: offS }));
-  addStrip(segmentGroup, diverge.centreline, laneW / 2, 0.01, COLORS.asphalt, 0.95);
-  addStrip(segmentGroup, offsetCentre, laneW / 2, 0.01, COLORS.asphalt, 0.95);
+  addStrip(segmentGroup, diverge.centreline, laneW / 2, 0.01, ROAD_THEME.asphalt, 0.95);
+  addStrip(segmentGroup, offsetCentre, laneW / 2, 0.01, ROAD_THEME.asphalt, 0.95);
 
   // 2 -> 3 merge: the offset lane tapers back in to regain the 3rd lane x=104..118.
   const mergeOrigin = { point:{x:104,y:0}, fwd:{x:1,y:0}, left:{x:0,y:1} };
   const merge = buildLaneTaper({ origin:mergeOrigin, laneWidth:laneW, splitLanes:1, taperStart:0, taperEnd:14, side:1 });
-  addStrip(segmentGroup, merge.centreline, laneW / 2, 0.01, COLORS.asphalt, 0.95);
+  addStrip(segmentGroup, merge.centreline, laneW / 2, 0.01, ROAD_THEME.asphalt, 0.95);
 
   // Lane dividers on the main corridor (constant lane boundaries).
   [1, 2].forEach((k) => {
     const divider = offsetPolyline(centreline, k * laneW).left;
-    addPathLine(segmentGroup, divider, 0.14, 0.02, COLORS.white);
+    addPathLine(segmentGroup, divider, 0.14, 0.02, ROAD_THEME.white);
   });
   // Outer edges of the 3-lane corridor.
-  addPathLine(segmentGroup, offsetPolyline(centreline, inOuterS).left, 0.14, 0.02, COLORS.white);
-  addPathLine(segmentGroup, offsetPolyline(centreline, outOuterS).right, 0.14, 0.02, COLORS.white);
+  addPathLine(segmentGroup, offsetPolyline(centreline, inOuterS).left, 0.14, 0.02, ROAD_THEME.white);
+  addPathLine(segmentGroup, offsetPolyline(centreline, outOuterS).right, 0.14, 0.02, ROAD_THEME.white);
   // Offset lane boundary (its +left edge).
-  addPathLine(segmentGroup, offsetPolyline(offsetCentre, laneW / 2).left, 0.14, 0.02, COLORS.white);
+  addPathLine(segmentGroup, offsetPolyline(offsetCentre, laneW / 2).left, 0.14, 0.02, ROAD_THEME.white);
 
   // Sidewalk edges along both sides of the full 3-lane corridor.
   const sw = buildSidewalkBounds(centreline, halfWidth, state.sidewalkWidth, 0.25);
-  addStrip(segmentGroup, sw.left.outer, state.sidewalkWidth, -0.01, COLORS.sidewalk, 1);
-  addStrip(segmentGroup, sw.right.outer, state.sidewalkWidth, -0.01, COLORS.sidewalk, 1);
+  addStrip(segmentGroup, sw.left.outer, state.sidewalkWidth, -0.01, ROAD_THEME.sidewalk, 1);
+  addStrip(segmentGroup, sw.right.outer, state.sidewalkWidth, -0.01, ROAD_THEME.sidewalk, 1);
 
   // Street lights along the corridor centreline.
   placeStreetLights(centreline, { spacing:22, start:12, end:170, lateral: halfWidth + 0.5 }).forEach(({ point, tangent })=>{
@@ -400,8 +340,7 @@ function buildSegmentDemo(){
     armMesh.rotation.z = Math.PI/2.6;
     armMesh.position.set(point.x+0.35*dirOut.x, 3.5, point.y+0.35*dirOut.y);
     segmentGroup.add(armMesh);
-    const lampMat = new THREE.MeshStandardMaterial({color:0xfff1c2, emissive:0xffdd88, emissiveIntensity:0.9, roughness:0.4});
-    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.14,10,8), lampMat);
+    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.14,10,8), glowMat(0xfff1c2, 0xffdd88, 0.9));
     lamp.position.set(point.x+0.75*dirOut.x, 3.35, point.y+0.75*dirOut.y);
     segmentGroup.add(lamp);
   });
@@ -419,7 +358,7 @@ function regenerate(){
   // Layer 1: road model (geometry + connectivity + right-turn facilities).
   const model = buildRoadModel(state);
   const n = model.geoms.length;
-  if(n<2){ renderTopologyOverlay(model.geoms, []); buildSegmentDemo(); updateProjectInsights(); return; }
+  if(n<2){ renderTopologyOverlay(model.geoms, []); buildSegmentDemo(); updateProjectInsights(); renderer.shadowMap.needsUpdate=true; return; }
 
   // Layer 2: lane graph (single source of truth for lanes/centreline/arrows).
   const topology = computeLaneTopology(model.geoms, {
@@ -438,6 +377,7 @@ function regenerate(){
   renderTopologyOverlay(model.geoms, model.rightFacilities);
   buildSegmentDemo();
   updateProjectInsights();
+  renderer.shadowMap.needsUpdate=true;
 }
 
 // ---------------------------------------------------------------- ANIMATION LOOP (traffic light phase)
