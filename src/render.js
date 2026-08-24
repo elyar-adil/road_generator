@@ -318,8 +318,13 @@ export function renderRoadScene(derived, group, theme = ROAD_THEME) {
   const lampSets = [];
   const batch = new MarkBatch();
 
-  // road surfaces (arm quads + central polygon)
-  derived.roadSurfaces.forEach((pts) => batch.poly(pts, 0.01, theme.asphalt, 0.95));
+  // road surfaces: plain point arrays render at base height; {pts, y} entries
+  // layer above (roundabout branch ribbons overlap stems/annulus).
+  derived.roadSurfaces.forEach((entry) => {
+    const pts = Array.isArray(entry) ? entry : entry.pts;
+    const y = Array.isArray(entry) ? 0.01 : (entry.y ?? 0.01);
+    batch.poly(pts, y, theme.asphalt, 0.95);
+  });
 
   // median islands
   derived.medianIslands.forEach((pts) => {

@@ -199,6 +199,8 @@ export function buildRoadModel(state) {
       inscribedR: coreR,
       circWidth: Math.max(4.5, coreR - baseLayout.islandR),
       islandR: baseLayout.islandR,
+      // Ring lane count grows if the unified core radius widened the carriageway.
+      circLanes: Math.max(baseLayout.circLanes, Math.floor(Math.max(4.5, coreR - baseLayout.islandR) / cfg.laneWidth)),
     };
     return {
       geoms,

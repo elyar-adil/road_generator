@@ -12,6 +12,9 @@ function roundaboutScene(overrides = {}) {
 
 const cfgArmLength = (model) => model.cfg.armLength;
 
+// roadSurfaces entries may be plain point arrays or {pts, y} layered ribbons.
+const surfacePolys = (scene) => scene.roadSurfaces.map((e) => (Array.isArray(e) ? e : e.pts));
+
 describe('roundabout derivation', () => {
   it('produces the circulatory annulus, central island and splitter islands', () => {
     const { model, scene } = roundaboutScene();
@@ -28,14 +31,14 @@ describe('roundabout derivation', () => {
       }
     }
 
-    // One teardrop splitter island per approach, entirely on the approach side.
+    // One fork-wedge island per approach: hugs the seam arc out to the fork.
     expect(scene.guideAreas).toHaveLength(4);
     expect(scene.guideAreas.every((g) => g.planted)).toBe(true);
     for (const g of scene.guideAreas) {
       for (const p of g.pts) {
         const r = Math.hypot(p.x, p.y);
-        expect(r).toBeGreaterThanOrEqual(inscribedR - 0.35);
-        expect(r).toBeLessThanOrEqual(inscribedR + 9 + 1e-9);
+        expect(r).toBeGreaterThanOrEqual(islandR - 1e-6);
+        expect(r).toBeLessThanOrEqual(inscribedR + 10.5);
       }
     }
   });
@@ -113,28 +116,25 @@ describe('roundabout derivation', () => {
     for (const g of model.geoms) {
       expect(g.R).toBeCloseTo(inscribedR, 9);
     }
-    for (const poly of scene.roadSurfaces) {
+    for (const poly of surfacePolys(scene)) {
       for (const p of poly) {
         expect(Math.hypot(p.x, p.y)).toBeGreaterThanOrEqual(model.roundabout.islandR - 0.01);
       }
     }
   });
 
-  it('trims each approach along the seam arc, not a chord (no gaps to the ring)', () => {
+  it('lands every branch ribbon on the seam circle (no gaps to the ring)', () => {
     const { model, scene } = roundaboutScene();
     const { inscribedR } = model.roundabout;
-    // Approach polygons contain their far corners; count how many of their
-    // vertices sit exactly on the seam circle. A chord-trimmed arm would have
-    // only its two corner crossings near the radius and a straight run
-    // between them; an arc-trimmed arm carries the full grid slice.
-    let armsWithArcEdge = 0;
-    for (const poly of scene.roadSurfaces) {
-      const hasFarCorner = poly.some((p) => Math.hypot(p.x, p.y) > cfgArmLength(model) - 1e-6);
-      if (!hasFarCorner) continue;
-      const onSeam = poly.filter((p) => Math.abs(Math.hypot(p.x, p.y) - inscribedR) < 1e-6).length;
-      if (onSeam >= 8) armsWithArcEdge += 1;
+    // Branch ribbons are layered closed rings: they must span from the fork
+    // all the way in to the seam so pavement meets the ring gap-free.
+    const ribbons = scene.roadSurfaces.filter((e) => !Array.isArray(e));
+    expect(ribbons).toHaveLength(8); // entry + exit per 4 approaches
+    for (const { pts } of ribbons) {
+      const radii = pts.map((p) => Math.hypot(p.x, p.y));
+      expect(Math.min(...radii)).toBeLessThanOrEqual(inscribedR + 0.8);
+      expect(Math.max(...radii)).toBeGreaterThanOrEqual(inscribedR + 8.2);
     }
-    expect(armsWithArcEdge).toBe(4);
   });
 
   it('wraps sidewalks and curbs around the ring without crossing the island', () => {
@@ -144,7 +144,7 @@ describe('roundabout derivation', () => {
     expect(scene.curbs.length).toBeGreaterThanOrEqual(4 * 8);
     const limit = model.roundabout.islandR - 0.01;
     for (const sw of scene.sidewalks) {
-      expect(sw.path.length).toBeGreaterThanOrEqual(10);
+      expect(sw.path.length).toBeGreaterThanOrEqual(6);
       for (const p of sw.path) {
         expect(Math.hypot(p.x, p.y)).toBeGreaterThan(limit);
       }
