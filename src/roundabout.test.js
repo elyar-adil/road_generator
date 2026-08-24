@@ -3,8 +3,8 @@ import {
   annulusSectorQuads,
   circlePolygon,
   computeRoundaboutLayout,
-  lensPolygon,
   splitterIsland,
+  teardropPolygon,
 } from './roundabout.js';
 import { distance, pointInRing } from './geometry.js';
 
@@ -76,34 +76,38 @@ describe('roundabout polygons', () => {
     expect(quads.some((quad) => pointInRing({ x: C.x, y: C.y }, quad))).toBe(false);
   });
 
-  it('builds pointed symmetric lens islands', () => {
-    const lens = lensPolygon({ x: 0, y: 0 }, { x: 10, y: 0 }, 1.2, 20);
-    // Closed, symmetric about the axis, widest in the middle, zero at ends.
-    expect(lens[0]).toEqual({ x: 0, y: 0 });
-    let maxHalf = 0;
-    for (const p of lens) {
-      expect(Math.abs(p.y)).toBeLessThanOrEqual(0.61);
-      maxHalf = Math.max(maxHalf, Math.abs(p.y));
-    }
-    expect(maxHalf).toBeCloseTo(0.6, 6);
-    // Symmetric about the axis: point i mirrors point (n-1-i).
+  it('builds teardrop islands: blunt nose, full body, rounded outer end', () => {
+    const W = 2;
+    const lens = teardropPolygon({ x: 0, y: 0 }, { x: 10, y: 0 }, W, { segments: 40 });
+    // Closed, symmetric about the axis.
     const n = lens.length;
     for (let i = 0; i < n; i += 1) {
       const p = lens[i], q = lens[n - 1 - i];
       expect(p.x).toBeCloseTo(q.x, 9);
       expect(p.y).toBeCloseTo(-q.y, 9);
     }
+    const halfAt = (x) => Math.max(...lens.filter((p) => Math.abs(p.x - x) < 0.26).map((p) => Math.abs(p.y)));
+    // Nose starts as an exact point...
+    expect(lens[0]).toEqual({ x: 0, y: 0 });
+    expect(halfAt(0.3)).toBeLessThan(W * 0.35);
+    // ...reaches full width in the body...
+    expect(halfAt(5)).toBeCloseTo(W / 2, 1);
+    // ...and rounds off before the outer end.
+    expect(halfAt(9.7)).toBeLessThan(W * 0.5 * 0.8);
   });
 
-  it('places the splitter island on the arm axis between island and inscribed radii', () => {
-    const island = splitterIsland(37, 10, 18, 1.2, 3);
+  it('places the splitter island on the approach side of the ring only', () => {
+    const inscribedR = 18;
+    const island = splitterIsland(37, inscribedR, { reach: 9, width: 2 });
     const rad = 37 * Math.PI / 180;
     const axisPoint = (r) => ({ x: r * Math.cos(rad), y: r * Math.sin(rad) });
-    // Both noses sit on the ray.
-    expect(distance(island[0], axisPoint(10.5))).toBeLessThan(1e-9);
-    const farNose = island.reduce((best, p) => (distance(p, { x: 0, y: 0 }) > distance(best, { x: 0, y: 0 }) ? p : best));
-    expect(Math.abs(distance(farNose, { x: 0, y: 0 }) - 21)).toBeLessThan(1e-6);
-    // Whole island stays outside the central island.
-    for (const p of island) expect(distance(p, { x: 0, y: 0 })).toBeGreaterThan(10);
+    // Nose kisses the seam circle; the far cap sits at reach.
+    expect(distance(island[0], axisPoint(inscribedR - 0.3))).toBeLessThan(1e-6);
+    const radii = island.map((p) => distance(p, { x: 0, y: 0 }));
+    expect(Math.min(...radii)).toBeGreaterThanOrEqual(inscribedR - 0.35);
+    expect(Math.max(...radii)).toBeLessThanOrEqual(inscribedR + 9 + 1e-9);
+    // Never reaches into the circulatory carriageway band.
+    const deepest = Math.min(...radii);
+    expect(deepest).toBeGreaterThan(inscribedR - 0.4);
   });
 });

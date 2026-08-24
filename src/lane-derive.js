@@ -792,13 +792,18 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
     const arm = g.arm;
     if (arm.laneIn <= 0 && arm.laneOut <= 0) return;
     const facilityStart = g.R + 0.5;
+    // Raised medians chain onto the splitter island: start them just past the
+    // island's blunt outer end instead of dropping a separate rounded nose
+    // next to it.
+    const ISLAND_REACH = 9;
+    const medianStartU = Math.max(facilityStart, roundabout.inscribedR + ISLAND_REACH + 0.3);
 
     // approach pavement, arc-trimmed at the circulatory carriageway
     scene.roadSurfaces.push(roundaboutArmPolygon(g, cfg, roundabout, seamGrid));
 
     // center separation on the approach (identical rules to cross nodes)
     if (arm.centerMode === 'planted' && g.medW > 0.15) {
-      const top = medianIslandTop(g, facilityStart, cfg);
+      const top = medianIslandTop(g, medianStartU, cfg);
       if (top) scene.medianIslands.push(top);
     } else if (arm.laneIn > 0 && arm.laneOut > 0
         && (arm.centerMode === 'doubleYellow' || arm.centerMode === 'doubleYellowRail')) {
@@ -843,12 +848,12 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
   geoms.forEach((g) => {
     if (g.arm.laneIn <= 0 && g.arm.laneOut <= 0) return;
     scene.guideAreas.push({
-      pts: splitterIsland(g.arm.angle, roundabout.islandR, roundabout.inscribedR, 1.2, 3),
+      pts: splitterIsland(g.arm.angle, roundabout.inscribedR, { reach: 9, width: 2 }),
       planted: true,
     });
-    // street lamp just past the splitter island nose
+    // street lamp just past the island's blunt outer end
     const dirOut = v2(Math.cos(g.arm.angle * Math.PI / 180), Math.sin(g.arm.angle * Math.PI / 180));
-    const noseR = roundabout.inscribedR + 3;
+    const noseR = roundabout.inscribedR + 9;
     scene.streetLamps.push({
       pos: scl(dirOut, noseR + 1.6 + state.sidewalkWidth * 0.6),
       dir: dirOut,
@@ -943,9 +948,14 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
       const sMax = Math.max(g.inOuterS, g.outOuterS);
       const bars = [];
       const stripeW = 0.5, gap = 0.45;
+      // Pedestrians cross THROUGH the splitter island gap: skip stripes over
+      // the raised island footprint.
+      const islandHalf = 1.0 + 0.35;
       let s = sMin + stripeW / 2 + 0.3;
       while (s < sMax - 0.3) {
-        bars.push([g.wp(startU, s), g.wp(startU + depth, s)]);
+        if (Math.abs(s) >= islandHalf) {
+          bars.push([g.wp(startU, s), g.wp(startU + depth, s)]);
+        }
         s += stripeW + gap;
       }
       if (bars.length) scene.crosswalks.push({ bars });

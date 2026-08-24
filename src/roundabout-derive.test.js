@@ -28,14 +28,14 @@ describe('roundabout derivation', () => {
       }
     }
 
-    // One planted splitter island per approach.
+    // One teardrop splitter island per approach, entirely on the approach side.
     expect(scene.guideAreas).toHaveLength(4);
     expect(scene.guideAreas.every((g) => g.planted)).toBe(true);
     for (const g of scene.guideAreas) {
       for (const p of g.pts) {
         const r = Math.hypot(p.x, p.y);
-        expect(r).toBeGreaterThan(islandR);
-        expect(r).toBeLessThanOrEqual(inscribedR + 3 + 1e-9);
+        expect(r).toBeGreaterThanOrEqual(inscribedR - 0.35);
+        expect(r).toBeLessThanOrEqual(inscribedR + 9 + 1e-9);
       }
     }
   });

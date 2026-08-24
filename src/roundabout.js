@@ -52,17 +52,25 @@ export function annulusSectorQuads(center, rInner, rOuter, segments = 48) {
   return quads;
 }
 
-// Pointed-both-ends splitter island (lens) between p0 and p1. Width profile
-// follows sin(pi·t), so both noses taper to zero - the classic give-way island
-// silhouette.
-export function lensPolygon(p0, p1, maxWidth, segments = 16) {
+// Teardrop channelizing-island outline between p0 (inner nose) and p1 (outer
+// end): rounded point at the nose, full width held through the body, blunt
+// semicircular cap at the far end. This mirrors how real splitter islands read
+// from above - never a double-pointed lens.
+export function teardropPolygon(p0, p1, maxWidth, {
+  segments = 40, noseFrac = 0.14, tailFrac = 0.12,
+} = {}) {
   const axis = { x: p1.x - p0.x, y: p1.y - p0.y };
   const length = Math.hypot(axis.x, axis.y) || 1;
   const normal = { x: -axis.y / length, y: axis.x / length };
+  const halfWidthAt = (t) => {
+    if (t < noseFrac) return Math.sqrt(t / noseFrac);
+    if (t > 1 - tailFrac) return Math.cos(((t - (1 - tailFrac)) / tailFrac) * Math.PI / 2);
+    return 1;
+  };
   const left = [], right = [];
   for (let i = 0; i <= segments; i += 1) {
     const t = i / segments;
-    const half = Math.max(0, Math.sin(Math.PI * t)) * maxWidth / 2;
+    const half = Math.max(0, halfWidthAt(t)) * maxWidth / 2;
     const bx = p0.x + axis.x * t, by = p0.y + axis.y * t;
     left.push({ x: bx + normal.x * half, y: by + normal.y * half });
     right.push({ x: bx - normal.x * half, y: by - normal.y * half });
@@ -70,13 +78,14 @@ export function lensPolygon(p0, p1, maxWidth, segments = 16) {
   return left.concat(right.reverse());
 }
 
-// Splitter island on an arm's axis, spanning radially from just outside the
-// central island to just past the inscribed circle.
-export function splitterIsland(angleDeg, islandR, inscribedR, maxWidth = 1.2, reach = 3) {
+// Splitter island for one approach: sits on the approach road BEFORE the ring,
+// nose tucked against the inscribed-circle seam and body extending outward
+// past the pedestrian crossing. Never covers circulating lanes.
+export function splitterIsland(angleDeg, inscribedR, { reach = 9, width = 2 } = {}) {
   const frame = createStraightFrame({ x: 0, y: 0 }, angleDeg);
-  return lensPolygon(
-    frame.wp(islandR + 0.5, 0),
+  return teardropPolygon(
+    frame.wp(inscribedR - 0.3, 0),
     frame.wp(inscribedR + reach, 0),
-    maxWidth,
+    width,
   );
 }
