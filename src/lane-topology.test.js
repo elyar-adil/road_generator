@@ -5,7 +5,8 @@ import {
   inboundToOutboundLane,
   laneIndicesByMovement,
 } from './lane-topology.js';
-import { createSeededRandom } from './state.js';
+import { createSeededRandom, createDefaultProject, sanitizeProject } from './state.js';
+import { buildRoadModel } from './road-model.js';
 
 function fakeGeom(angleDeg, laneIn, laneOut, wait = 'none', right = { type: 'none' }, leftTurnLanes = 1, rightTurnMode = 'branch') {
   const a = angleDeg * Math.PI / 180;
@@ -129,7 +130,9 @@ describe('lane topology graph', () => {
     expect(dedicated).toBeDefined();
     expect(dedicated.skip).toBe(false);
     expect(dedicated.path[0].x).toBeCloseTo(46, 6); // connected to arm root
-    expect(dedicated.path).toContain(branch[0]);    // runs through the branch
+    // Runs through the branch: after uniform resampling some vertex lies
+    // within half a step of the branch start.
+    expect(dedicated.path.some((p) => Math.hypot(p.x - branch[0].x, p.y - branch[0].y) < 0.4)).toBe(true);
     // Through lanes keep a full straight centreline from the junction.
     const through = inLanes.find((cl) => cl.index === 0);
     expect(through.path[0].x).toBeCloseTo(18.5, 6); // nearU = R(18)+0.5
@@ -207,5 +210,67 @@ describe('lane topology graph', () => {
     // The outer lane is a straight lane, so it keeps a straight connection.
     const straightConn = connections.filter((c) => c.movement === 'straight' && c.fromArm === 0);
     expect(straightConn.some((c) => c.fromIndex === 2)).toBe(true);
+  });
+});
+
+describe('centreline smoothness (regression metric)', () => {
+  // Kinks and chord-jumps across islands show up as sharp turns between
+  // consecutive segments. After uniform resampling, no joint may turn harder
+  // than a real vehicle path would at design speed, and no stutter segments
+  // shorter than the resample step's half may appear mid-path.
+  const MAX_TURN_DEG = 16;
+  const MIN_SEG = 0.3;
+
+  function checkSmooth(paths) {
+    let worstTurn = 0;
+    for (const path of paths) {
+      for (let i = 1; i < path.length - 1; i += 1) {
+        const a = path[i - 1], b = path[i], c = path[i + 1];
+        const l1 = Math.hypot(b.x - a.x, b.y - a.y);
+        const l2 = Math.hypot(c.x - b.x, c.y - b.y);
+        expect(l1).toBeGreaterThanOrEqual(MIN_SEG);
+        expect(l2).toBeGreaterThanOrEqual(MIN_SEG);
+        const cos = ((b.x - a.x) * (c.x - b.x) + (b.y - a.y) * (c.y - b.y)) / (l1 * l2);
+        worstTurn = Math.max(worstTurn, Math.acos(Math.min(1, Math.max(-1, cos))) * 180 / Math.PI);
+      }
+    }
+    expect(worstTurn).toBeLessThan(MAX_TURN_DEG);
+  }
+
+  it('keeps every centreline and connection run smooth on a facility-rich cross', () => {
+    const state = sanitizeProject({
+      ...createDefaultProject(),
+      arms: createDefaultProject().arms.map((arm) => ({
+        ...arm, laneIn: 4, rightTurnLane: true, rightTurnType: 'split', rightTurnMode: 'branch', waitingArea: 'left',
+      })),
+    });
+    const model = buildRoadModel(state);
+    const { laneCenterlines, connections } = computeLaneTopology(model.geoms, {
+      armLength: state.armLength,
+      facilities: model.rightFacilities,
+    });
+    const clRuns = laneCenterlines.filter((cl) => !cl.skip).flatMap((cl) => (cl.runs.length ? cl.runs : [cl.path]));
+    const connRuns = connections.flatMap((c) => (c.runs.length ? c.runs : [c.path]));
+    expect(clRuns.length).toBeGreaterThan(8);
+    expect(connRuns.length).toBeGreaterThan(10);
+    checkSmooth(clRuns);
+    checkSmooth(connRuns);
+  });
+
+  it('keeps branch centrelines smooth in scheme 2', () => {
+    const state = sanitizeProject({
+      ...createDefaultProject(),
+      arms: createDefaultProject().arms.map((arm) => ({
+        ...arm, rightTurnLane: true, rightTurnType: 'slip', rightTurnMode: 'branch',
+      })),
+    });
+    const model = buildRoadModel(state);
+    const { laneCenterlines } = computeLaneTopology(model.geoms, {
+      armLength: state.armLength,
+      facilities: model.rightFacilities,
+    });
+    const branchRuns = laneCenterlines.filter((cl) => cl.side === 'branch').map((cl) => cl.path);
+    expect(branchRuns.length).toBeGreaterThan(0);
+    checkSmooth(branchRuns);
   });
 });

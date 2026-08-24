@@ -118,6 +118,35 @@ export function polylineLength(path) {
   return total;
 }
 
+// Resample a polyline at a near-uniform arc-length step. The original first
+// and last points are always preserved exactly; interior vertices are replaced
+// by evenly spaced samples so downstream consumers (ribbon meshes, offset
+// paths, smoothness checks) never see sparse runs or stutter segments. A tail
+// shorter than half the step is folded into the end point instead of emitted.
+export function resampleByDistance(path, step = 0.75) {
+  if (!path || path.length === 0) return [];
+  if (path.length === 1 || step <= 0) return path.map(cloneV);
+  const out = [cloneV(path[0])];
+  let carry = 0;
+  for (let i = 1; i < path.length; i += 1) {
+    const a = path[i - 1], b = path[i];
+    const segLen = distance(a, b);
+    if (segLen < EPSILON) continue;
+    let travelled = 0;
+    while (carry + (segLen - travelled) >= step) {
+      travelled += step - carry;
+      carry = 0;
+      out.push(lerp2(a, b, travelled / segLen));
+    }
+    carry += segLen - travelled;
+  }
+  const last = cloneV(path[path.length - 1]);
+  const tail = out[out.length - 1];
+  if (distance(tail, last) < step * 0.5) out[out.length - 1] = last;
+  else out.push(last);
+  return out;
+}
+
 export function pointAndTangentAtDistance(path, wantedDistance) {
   if (!path?.length) return null;
   if (path.length === 1) return { point: cloneV(path[0]), tangent: { x: 1, y: 0 } };

@@ -8,7 +8,7 @@
 // testable and reusable.
 
 import { classifyMovement, armLaneMovementSets } from './road-movements.js';
-import { add, scl, sub, len, appendCubic2, pointInRing, sweptTurn } from './geometry.js';
+import { add, scl, sub, len, appendCubic2, pointInRing, sweptTurn, resampleByDistance } from './geometry.js';
 
 // Which inbound lane index carries each movement type (median-side inside).
 // `lanes` is the per-lane Set<movement> from laneMovementSets.
@@ -291,13 +291,19 @@ export function computeLaneTopology(geoms, { armLength = 46, facilities = [] } =
   });
 
   // Drop any centreline/connection points that fall inside a guide triangle.
-  // `runs` is the canonical clipped geometry; `path` stays the flattened form
-  // for endpoint-inspecting consumers (never render it directly).
+  // Paths are first resampled at a uniform arc-length step so ribbon meshes
+  // and offset geometry stay smooth regardless of the generator's sampling;
+  // endpoints are preserved exactly. `runs` is the canonical clipped geometry;
+  // `path` stays the flattened form for endpoint-inspecting consumers (never
+  // render it directly).
+  const prepare = (path) => (path && path.length > 1 ? resampleByDistance(path, 0.75) : path);
   laneCenterlines.forEach((cl) => {
+    cl.path = prepare(cl.path);
     cl.runs = clipToRuns(cl.path);
     cl.path = cl.runs.flat();
   });
   connections.forEach((conn) => {
+    conn.path = prepare(conn.path);
     conn.runs = clipToRuns(conn.path);
     conn.path = conn.runs.flat();
   });
