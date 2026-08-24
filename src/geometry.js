@@ -212,19 +212,6 @@ export function offsetPolyline(path, halfWidth) {
   return { left, right };
 }
 
-// Offset with a width taper starting at path index 0 (scaleAt(i) in [0,1]).
-export function taperedOffsetPath(path, halfWidth, scaleAt) {
-  const left = [], right = [];
-  for (let i = 0; i < path.length; i += 1) {
-    const previous = path[Math.max(0, i - 1)], next = path[Math.min(path.length - 1, i + 1)];
-    const n = leftNormal(sub(next, previous));
-    const scaleFactor = Math.min(1, scaleAt ? scaleAt(i) : 1);
-    left.push(add(path[i], scl(n, halfWidth * scaleFactor)));
-    right.push(add(path[i], scl(n, -halfWidth * scaleFactor)));
-  }
-  return { left, right };
-}
-
 // Split a centreline into `laneCount` evenly spaced lane centrelines, with an
 // optional lateral taper (0 at the nose to full offset downstream).
 export function offsetLanePaths(path, laneCount, laneWidth, taperPoints = 0) {
@@ -317,25 +304,6 @@ export function rayBoundaryIntersect(point, direction, boundary, closed = false)
     if (dist < nearestDistance) { nearestDistance = dist; nearest = candidate; }
   }
   return nearest;
-}
-
-// Project a point into a local (u=forward, s=lateral) frame defined by g.
-export function toLocal(g, p) {
-  const d = sub(p, g.wp(0, 0));
-  return { u: d.x * g.fwd.x + d.y * g.fwd.y, s: d.x * g.left.x + d.y * g.left.y };
-}
-
-// Last crossing of a polyline with the arm edge line s=targetS.
-export function lastEdgeCrossing(points, g, targetS, minIndex) {
-  for (let i = points.length - 1; i > minIndex; i -= 1) {
-    const a = points[i - 1], b = points[i];
-    const sa = toLocal(g, a).s, sb = toLocal(g, b).s;
-    if ((sa - targetS) * (sb - targetS) < 0) {
-      const t = (targetS - sa) / (sb - sa);
-      return { index: i, point: lerp2(a, b, clamp(t, 0, 1)) };
-    }
-  }
-  return null;
 }
 
 export function edgeLine(g, uFrom, uTo, s, step) {

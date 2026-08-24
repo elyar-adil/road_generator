@@ -13,7 +13,7 @@
 
 import {
   v2, add, sub, scl, len, lerp2,
-  fillet, polylineLength, pointAndTangentAtDistance, offsetPolyline,
+  polylineLength, pointAndTangentAtDistance, offsetPolyline,
   buildDashedSegments, buildLeftTurnPath, trimPolyline,
   rayBoundaryIntersect, pointInRing, edgeLine,
 } from './geometry.js';

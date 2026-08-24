@@ -13,7 +13,7 @@
 // what an interchange/overpass composes later.
 
 import {
-  v2, add, scl, sub, len, lerp2,
+  v2, add, scl,
   fillet, lineIntersect,
 } from './geometry.js';
 
@@ -182,16 +182,4 @@ export function buildRoadModel(state) {
   const filletPts = buildCornerFillets(geoms, cfg);
 
   return { geoms, availPerArm, leftTargets, straightTargets, rightTargets, rightFacilities, filletPts, cfg };
-}
-
-// Whether a point lies over any road's carriageway envelope (used to keep
-// scenery clear of the network).
-export function pointBlockedByRoad(p, geoms, cfg) {
-  for (const g of geoms) {
-    const rel = sub(p, v2(0, 0));
-    const u = rel.x * g.fwd.x + rel.y * g.fwd.y;
-    const s = rel.x * g.left.x + rel.y * g.left.y;
-    if (u > -6 && u < cfg.armLength + 14 && Math.abs(s) < Math.max(g.inOuterS, -g.outOuterS) + 7 + cfg.sidewalkWidth) return true;
-  }
-  return false;
 }

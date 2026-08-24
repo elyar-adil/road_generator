@@ -3,11 +3,8 @@ import {
   buildLaneTaper,
   buildSegmentSurface,
   buildSidewalkBounds,
-  inboundLaneCentre,
   laneBundleBounds,
-  outboundLaneCentre,
   placeStreetLights,
-  segmentDividers,
 } from './segment.js';
 import { polylineLength } from './geometry.js';
 
@@ -30,11 +27,6 @@ describe('road segment primitives', () => {
 
   it('reserves no median when only one direction has lanes', () => {
     expect(laneBundleBounds(2, 0, 3.25, 1.5).medW).toBe(0);
-  });
-
-  it('centres inbound lanes on the right and outbound lanes on the left', () => {
-    expect(inboundLaneCentre(0, 3.25, 0)).toBeCloseTo(-1.625, 6);
-    expect(outboundLaneCentre(0, 3.25, 0)).toBeCloseTo(1.625, 6);
   });
 
   it('builds a diverge taper that feathers from zero to full split width', () => {
@@ -77,14 +69,6 @@ describe('road segment primitives', () => {
     // lateral offset to the +left
     expect(lights[0].point.y).toBeCloseTo(1.5, 6);
     expect(lights[1].u - lights[0].u).toBeCloseTo(20, 6);
-  });
-
-  it('emits dashed dividers with a fixed cadence', () => {
-    const dividers = segmentDividers(straightCentre(20), [0], { dashLen: 1, gapLen: 1 });
-    expect(dividers.length).toBeGreaterThan(5);
-    dividers.forEach(([p0, p1]) => {
-      expect(p1.x - p0.x).toBeCloseTo(1, 5);
-    });
   });
 
   it('produces finite-energy results for curved inputs', () => {

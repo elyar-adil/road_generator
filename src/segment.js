@@ -10,7 +10,7 @@
 
 import {
   add, scl, leftNormal,
-  polylineLength, pointAndTangentAtDistance, offsetPolyline, buildDashedSegments,
+  polylineLength, pointAndTangentAtDistance, offsetPolyline,
 } from './geometry.js';
 
 // Cross-section of a two-way carriageway, mirroring the intersection arm model:
@@ -21,16 +21,6 @@ export function laneBundleBounds(laneIn, laneOut, laneWidth, medianWidth = 0) {
   const inOuterS = medW / 2 + laneOut * laneWidth;
   const outOuterS = -(medW / 2 + laneIn * laneWidth);
   return { medW, inOuterS, outOuterS };
-}
-
-// Lateral coordinate of the centre of an inbound lane (median-side = index 0).
-export function inboundLaneCentre(medW, laneWidth, index) {
-  return -(medW / 2 + (index + 0.5) * laneWidth);
-}
-
-// Lateral coordinate of the centre of an outbound lane (median-side = index 0).
-export function outboundLaneCentre(medW, laneWidth, index) {
-  return medW / 2 + (index + 0.5) * laneWidth;
 }
 
 // Straight widening/taper for a lane group that peels off (diverge) or joins
@@ -114,15 +104,4 @@ export function placeStreetLights(centreline, {
     u += spacing;
   }
   return result;
-}
-
-// Dashed lane-divider markings along the length of a segment, returning array
-// of [p0, p1] dash segments for the given lateral offset(s).
-export function segmentDividers(centreline, lateralOffsets, { dashLen = 2.6, gapLen = 2.2 } = {}) {
-  const dividers = [];
-  lateralOffsets.forEach((offset) => {
-    const offsetPath = offsetPolyline(centreline, offset).left;
-    buildDashedSegments(offsetPath, dashLen, gapLen).forEach(([p0, p1]) => dividers.push([p0, p1]));
-  });
-  return dividers;
 }
