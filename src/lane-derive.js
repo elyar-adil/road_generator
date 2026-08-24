@@ -442,6 +442,7 @@ function createEmptyScene() {
     streetLamps: [],
     buildings: [],
     trees: [],
+    entryMarks: [],
   };
 }
 
@@ -815,6 +816,71 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
       dir: dirOut,
     });
   });
+
+  // ---- entry semantics: yield line + give-way triangle + crossing ----
+  // Right-hand traffic circulates counter-clockwise: the inbound (-s) side of
+  // each arm is the entry, and its give-way line is the arc where those lanes
+  // meet the circulatory carriageway.
+  geoms.forEach((g, i) => {
+    const arm = g.arm;
+    if (arm.laneIn <= 0) return;
+
+    const innerS = -(g.medW / 2);
+    const uIn = armEdgeStation(g, innerS, roundabout.inscribedR);
+    const uOut = armEdgeStation(g, g.outOuterS, roundabout.inscribedR);
+    if (uIn <= 1 || uOut <= 1) return;
+
+    const pIn = g.wp(uIn, innerS);
+    const pOut = g.wp(uOut, g.outOuterS);
+    const angleFrom = Math.atan2(pIn.y, pIn.x);
+    const angleTo = Math.atan2(pOut.y, pOut.x);
+
+    // dashed give-way line hugging the circle across the entry lanes
+    const entry = { dashes: [], legs: [] };
+    const yieldArc = arcPath(roundabout.inscribedR + 0.12, angleFrom, angleTo);
+    entry.dashes = pathDashes(yieldArc, { dashLen: 0.9, gapLen: 0.7 });
+
+    // give-way triangle just inside the line, apex pointing at the island
+    if (angleFrom - angleTo > 0.15) {
+      const mid = (angleFrom + angleTo) / 2;
+      const radial = v2(Math.cos(mid), Math.sin(mid));
+      const tangent = v2(-radial.y, radial.x);
+      const cRadius = roundabout.inscribedR - 1.5;
+      const centre = add(scl(radial, cRadius), scl(tangent, 0));
+      const apex = add(centre, scl(radial, -0.85));
+      const b1 = add(centre, scl(tangent, 0.42));
+      const b2 = add(centre, scl(tangent, -0.42));
+      entry.legs.push([b1, b2], [b1, apex], [b2, apex]);
+    }
+    scene.entryMarks.push(entry);
+
+    // circulating flow arrow downstream of the entry (counter-clockwise)
+    const midC = roundabout.inscribedR - roundabout.circWidth * 0.32;
+    const flowArc = arcPath(midC, angleTo + 0.14, angleTo + 0.62);
+    const flowPts = arrowOnPath(flowArc, ['straight']);
+    if (flowPts.length) scene.arrows.push({ armIndex: i, laneIndex: -1, pts: flowPts, onBranch: true });
+  });
+
+  // pedestrian crossings across each full arm behind the splitter noses
+  if (state.showCrosswalk) {
+    geoms.forEach((g) => {
+      const arm = g.arm;
+      if (arm.laneIn <= 0 && arm.laneOut <= 0) return;
+      const startU = roundabout.inscribedR + 3.8;
+      const depth = Math.min(3.2, cfg.armLength - startU - 2);
+      if (depth < 1.4) return;
+      const sMin = Math.min(g.inOuterS, g.outOuterS);
+      const sMax = Math.max(g.inOuterS, g.outOuterS);
+      const bars = [];
+      const stripeW = 0.5, gap = 0.45;
+      let s = sMin + stripeW / 2 + 0.3;
+      while (s < sMax - 0.3) {
+        bars.push([g.wp(startU, s), g.wp(startU + depth, s)]);
+        s += stripeW + gap;
+      }
+      if (bars.length) scene.crosswalks.push({ bars });
+    });
+  }
 
   // sidewalk bands + curbs wrap each gap: down one approach's outer edge,
   // around the circulatory carriageway, out along the neighbour's far edge.

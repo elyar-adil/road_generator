@@ -38,14 +38,31 @@ describe('roundabout derivation', () => {
     }
   });
 
-  it('suppresses signal-controlled markings and lights', () => {
+  it('suppresses only signal-controlled facilities', () => {
     const { scene } = roundaboutScene();
     expect(scene.stopLines).toHaveLength(0);
-    expect(scene.crosswalks).toHaveLength(0);
-    expect(scene.arrows).toHaveLength(0);
     expect(scene.waitingAreas).toHaveLength(0);
     expect(scene.trafficLights).toHaveLength(0);
     expect(scene.branchSurfaces).toHaveLength(0);
+    // Pedestrian crossings stay: they sit behind the splitter noses.
+    expect(scene.crosswalks).toHaveLength(4);
+  });
+
+  it('marks every entry with a give-way line, triangle and flow arrow', () => {
+    const { scene } = roundaboutScene();
+    expect(scene.entryMarks).toHaveLength(4);
+    for (const entry of scene.entryMarks) {
+      expect(entry.dashes.length).toBeGreaterThan(2);
+      expect(entry.legs).toHaveLength(3);
+    }
+    // One counter-clockwise circulating arrow per approach.
+    const flowArrows = scene.arrows.filter((a) => a.onBranch);
+    expect(flowArrows).toHaveLength(4);
+    for (const arrow of flowArrows) {
+      // pts is a list of polygons (nested), matching the render-layer contract.
+      const polys = Array.isArray(arrow.pts[0]) ? arrow.pts : [arrow.pts];
+      expect(polys.some((poly) => poly.length > 2)).toBe(true);
+    }
   });
 
   it('keeps approach markings but truncates pavement at the circle', () => {

@@ -384,6 +384,15 @@ export function renderRoadScene(derived, group, theme = ROAD_THEME) {
   // guide chevrons
   addDashSegments(batch, derived.guideChevrons.map(([p0, p1]) => [p0, p1]), 0.35, 0.096, theme);
 
+  // roundabout entry markings: dashed give-way line + solid give-way triangle
+  (derived.entryMarks || []).forEach(({ dashes, legs }) => {
+    addDashSegments(batch, dashes, 0.3, 0.094, theme);
+    legs.forEach(([p0, p1]) => batch.box(p0, p1, {
+      lateral: 0, width: 0.26, height: 0.01, yBottom: 0.094,
+      color: theme.white, rough: 0.6, extend: 0,
+    }));
+  });
+
   // sidewalks + curbs
   derived.sidewalks.forEach((sw) => {
     const ring = pathStripRing(sw.path, sw.width, sw.offset);
