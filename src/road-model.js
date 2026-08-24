@@ -177,22 +177,29 @@ export function buildRoadModel(state) {
   const arms = state.arms.slice().sort((a, b) => a.angle - b.angle);
 
   if (state.junctionType === 'roundabout') {
-    const roundabout = computeRoundaboutLayout({
+    const baseLayout = computeRoundaboutLayout({
       arms, laneWidth: cfg.laneWidth, intersectionSize: cfg.intersectionSize,
     });
     const geoms = arms.map((arm) => armGeometry(arm, cfg));
+    // Adjacent-arm separation may demand more radial room than the nominal
+    // inscribed circle. One UNIFORM core radius keeps every approach on the
+    // exact same seam circle (a per-arm radius would leave gaps).
     updateArmRadii(geoms, cfg);
-    // Arms reach the circulatory carriageway: floor R at the inscribed circle
-    // (small overlap so pavement joints stay sealed).
+    const coreR = Math.max(baseLayout.inscribedR, ...geoms.map((g) => g.R), 12);
     geoms.forEach((g) => {
-      g.R = Math.min(cfg.armLength - 5, Math.max(g.R, roundabout.inscribedR + 0.25));
+      g.R = coreR;
+      g.leftR = coreR;
+      g.rightR = coreR;
       g.nearLeft = g.wp(g.R, g.inOuterS);
       g.nearRight = g.wp(g.R, g.outOuterS);
       g.nearMedL = g.wp(g.R, g.medW / 2);
       g.nearMedR = g.wp(g.R, -g.medW / 2);
-      g.leftR = g.R;
-      g.rightR = g.R;
     });
+    const roundabout = {
+      inscribedR: coreR,
+      circWidth: Math.max(4.5, coreR - baseLayout.islandR),
+      islandR: baseLayout.islandR,
+    };
     return {
       geoms,
       availPerArm: [], leftTargets: [], straightTargets: [],

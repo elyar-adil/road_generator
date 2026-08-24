@@ -729,6 +729,35 @@ function armEdgeStation(g, s, radius) {
   return u2 > 1 ? Math.sqrt(u2) : 0;
 }
 
+// Approach pavement whose inner edge FOLLOWS the circulatory carriageway's
+// outer circle instead of cutting a chord across it. Arc interior vertices are
+// sampled from the SAME 64-point grid the annulus sectors use (bit-identical
+// cos/sin inputs), so the shared seam is gap-free and overlap-free.
+function roundaboutArmPolygon(g, cfg, roundabout, seamGrid) {
+  const coreR = roundabout.inscribedR;
+  const uIn = armEdgeStation(g, g.inOuterS, coreR);
+  const uOut = armEdgeStation(g, g.outOuterS, coreR);
+  const pIn = g.wp(uIn, g.inOuterS);
+  const pOut = g.wp(uOut, g.outOuterS);
+  const aOut = Math.atan2(pOut.y, pOut.x);
+  let aIn = Math.atan2(pIn.y, pIn.x);
+  while (aIn <= aOut) aIn += Math.PI * 2;
+  const step = Math.PI * 2 / seamGrid.length;
+  const i0 = Math.ceil((aOut + 1e-9) / step);
+  const i1 = Math.floor((aIn - 1e-9) / step);
+  const arc = [];
+  for (let k = i0; k <= i1; k += 1) {
+    arc.push(seamGrid[((k % seamGrid.length) + seamGrid.length) % seamGrid.length]);
+  }
+  return [
+    pOut,
+    ...arc,
+    pIn,
+    g.wp(cfg.armLength, g.inOuterS),
+    g.wp(cfg.armLength, g.outOuterS),
+  ];
+}
+
 // CCW arc polyline on the origin circle between two absolute angles.
 function arcPath(radius, angleFrom, angleTo) {
   const count = Math.max(4, Math.ceil(Math.abs(angleTo - angleFrom) / 0.12));
@@ -740,23 +769,32 @@ function arcPath(radius, angleFrom, angleTo) {
   return pts;
 }
 
+// Wrap `angle` into (reference - PI, reference + PI]. atan2 returns values in
+// (-PI, PI], so features near the branch cut (an arm pointing at 180 deg)
+// otherwise unwrap the wrong way and draw arcs around the whole map.
+function unwrapAround(angle, reference) {
+  while (angle <= reference - Math.PI) angle += Math.PI * 2;
+  while (angle > reference + Math.PI) angle -= Math.PI * 2;
+  return angle;
+}
+
 export function deriveRoundaboutScene(model, state, random = Math.random) {
   const { geoms, roundabout } = model;
   if (!roundabout) throw new Error('roundabout scene requires a roundabout road model');
   const cfg = model.cfg;
   const n = geoms.length;
   const scene = createEmptyScene();
+  // Shared seam-circle vertex grid: identical numbers feed the annulus sectors
+  // below and every approach's inner arc edge.
+  const seamGrid = circlePolygon({ x: 0, y: 0 }, roundabout.inscribedR, 64);
 
   geoms.forEach((g) => {
     const arm = g.arm;
     if (arm.laneIn <= 0 && arm.laneOut <= 0) return;
     const facilityStart = g.R + 0.5;
 
-    // approach pavement up to the circulatory carriageway
-    scene.roadSurfaces.push([
-      g.wp(g.R, g.inOuterS), g.wp(cfg.armLength, g.inOuterS),
-      g.wp(cfg.armLength, g.outOuterS), g.wp(g.R, g.outOuterS),
-    ]);
+    // approach pavement, arc-trimmed at the circulatory carriageway
+    scene.roadSurfaces.push(roundaboutArmPolygon(g, cfg, roundabout, seamGrid));
 
     // center separation on the approach (identical rules to cross nodes)
     if (arm.centerMode === 'planted' && g.medW > 0.15) {
@@ -820,10 +858,12 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
   // ---- entry semantics: yield line + give-way triangle + crossing ----
   // Right-hand traffic circulates counter-clockwise: the inbound (-s) side of
   // each arm is the entry, and its give-way line is the arc where those lanes
-  // meet the circulatory carriageway.
+  // meet the circulatory carriageway. All angles are unwrapped around the
+  // arm's own axis so an arm pointing at +/-180 deg never sweeps the map.
   geoms.forEach((g, i) => {
     const arm = g.arm;
     if (arm.laneIn <= 0) return;
+    const theta = arm.angle * Math.PI / 180;
 
     const innerS = -(g.medW / 2);
     const uIn = armEdgeStation(g, innerS, roundabout.inscribedR);
@@ -832,11 +872,11 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
 
     const pIn = g.wp(uIn, innerS);
     const pOut = g.wp(uOut, g.outOuterS);
-    const angleFrom = Math.atan2(pIn.y, pIn.x);
-    const angleTo = Math.atan2(pOut.y, pOut.x);
+    const angleFrom = unwrapAround(Math.atan2(pIn.y, pIn.x), theta);
+    const angleTo = unwrapAround(Math.atan2(pOut.y, pOut.x), theta);
 
     // dashed give-way line hugging the circle across the entry lanes
-    const entry = { dashes: [], legs: [] };
+    const entry = { armIndex: i, dashes: [], legs: [] };
     const yieldArc = arcPath(roundabout.inscribedR + 0.12, angleFrom, angleTo);
     entry.dashes = pathDashes(yieldArc, { dashLen: 0.9, gapLen: 0.7 });
 
@@ -846,7 +886,7 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
       const radial = v2(Math.cos(mid), Math.sin(mid));
       const tangent = v2(-radial.y, radial.x);
       const cRadius = roundabout.inscribedR - 1.5;
-      const centre = add(scl(radial, cRadius), scl(tangent, 0));
+      const centre = scl(radial, cRadius);
       const apex = add(centre, scl(radial, -0.85));
       const b1 = add(centre, scl(tangent, 0.42));
       const b2 = add(centre, scl(tangent, -0.42));
@@ -860,6 +900,36 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
     const flowPts = arrowOnPath(flowArc, ['straight']);
     if (flowPts.length) scene.arrows.push({ armIndex: i, laneIndex: -1, pts: flowPts, onBranch: true });
   });
+
+  // Angular gap between consecutive approaches (CCW), trimmed by a margin so
+  // ring markings never touch the splitter islands. Shared by the circulating
+  // lane dividers and the sidewalk/curb wrap.
+  const TAU = Math.PI * 2;
+  const GAP_MARGIN = 0.18;
+  const gapSpans = [];
+  for (let i = 0; i < n; i += 1) {
+    const j = (i + 1) % n;
+    const gi = geoms[i], gj = geoms[j];
+    const uL = armEdgeStation(gi, gi.inOuterS, roundabout.inscribedR);
+    const uR = armEdgeStation(gj, gj.outOuterS, roundabout.inscribedR);
+    const from = Math.atan2(gi.wp(uL, gi.inOuterS).y, gi.wp(uL, gi.inOuterS).x);
+    let to = Math.atan2(gj.wp(uR, gj.outOuterS).y, gj.wp(uR, gj.outOuterS).x);
+    if (to <= from) to += TAU;
+    gapSpans.push({ from: from + GAP_MARGIN, to: to - GAP_MARGIN });
+  }
+
+  // circulating carriageway lane dividers: dashed arcs at even radii splits,
+  // laid only across the open gaps between splitter islands.
+  const ringWidth = roundabout.inscribedR - roundabout.islandR;
+  const circLanes = Math.max(1, Math.floor((ringWidth - 0.4) / state.laneWidth));
+  for (let k = 1; k < circLanes; k += 1) {
+    const rDivider = roundabout.islandR + ringWidth * k / circLanes;
+    gapSpans.forEach(({ from, to }) => {
+      if (to - from < 0.35) return;
+      pathDashes(arcPath(rDivider, from, to), { dashLen: 1.0, gapLen: 1.0 })
+        .forEach((seg) => scene.laneDashes.push(seg));
+    });
+  }
 
   // pedestrian crossings across each full arm behind the splitter noses
   if (state.showCrosswalk) {
@@ -889,13 +959,12 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
     const gi = geoms[i], gj = geoms[j];
     const leftCrossU = armEdgeStation(gi, gi.inOuterS, roundabout.inscribedR);
     const rightCrossU = armEdgeStation(gj, gj.outOuterS, roundabout.inscribedR);
-    const angleFrom = Math.atan2(
-      gi.wp(leftCrossU, gi.inOuterS).y, gi.wp(leftCrossU, gi.inOuterS).x,
+    const angleFrom = unwrapAround(
+      Math.atan2(gi.wp(leftCrossU, gi.inOuterS).y, gi.wp(leftCrossU, gi.inOuterS).x),
+      gi.arm.angle * Math.PI / 180,
     );
-    let angleTo = Math.atan2(
-      gj.wp(rightCrossU, gj.outOuterS).y, gj.wp(rightCrossU, gj.outOuterS).x,
-    );
-    if (angleTo <= angleFrom) angleTo += Math.PI * 2;
+    let angleTo = Math.atan2(gj.wp(rightCrossU, gj.outOuterS).y, gj.wp(rightCrossU, gj.outOuterS).x);
+    while (angleTo <= angleFrom) angleTo += Math.PI * 2;
     const path = [
       gi.farLeft,
       gi.wp(leftCrossU, gi.inOuterS),

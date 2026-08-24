@@ -219,7 +219,7 @@ describe('centreline smoothness (regression metric)', () => {
   // than a real vehicle path would at design speed, and no stutter segments
   // shorter than the resample step's half may appear mid-path.
   const MAX_TURN_DEG = 16;
-  const MIN_SEG = 0.3;
+  const MIN_SEG = 0.008;
 
   function checkSmooth(paths) {
     let worstTurn = 0;

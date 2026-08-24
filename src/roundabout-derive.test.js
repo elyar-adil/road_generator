@@ -10,6 +10,8 @@ function roundaboutScene(overrides = {}) {
   return { state, model, scene };
 }
 
+const cfgArmLength = (model) => model.cfg.armLength;
+
 describe('roundabout derivation', () => {
   it('produces the circulatory annulus, central island and splitter islands', () => {
     const { model, scene } = roundaboutScene();
@@ -48,6 +50,42 @@ describe('roundabout derivation', () => {
     expect(scene.crosswalks).toHaveLength(4);
   });
 
+  it('keeps every entry yield arc on its own arm sector (branch-cut regression)', () => {
+    const { model, scene } = roundaboutScene();
+    const { inscribedR } = model.roundabout;
+    // The default project includes an arm pointing at exactly 180 deg, whose
+    // crossings straddle the atan2 branch cut.
+    scene.entryMarks.forEach((entry) => {
+      const axis = model.geoms[entry.armIndex].arm.angle * Math.PI / 180;
+      expect(entry.dashes.length).toBeGreaterThan(0);
+      expect(entry.dashes.length).toBeLessThan(30); // never a map-wide sweep
+      entry.dashes.forEach(([p0, p1]) => {
+        [p0, p1].forEach((p) => {
+          expect(Math.abs(Math.hypot(p.x, p.y) - (inscribedR + 0.12))).toBeLessThan(0.05);
+          let d = Math.atan2(p.y, p.x) - axis;
+          while (d > Math.PI) d -= Math.PI * 2;
+          while (d < -Math.PI) d += Math.PI * 2;
+          // Inbound lanes sit clockwise of the axis.
+          expect(d).toBeLessThan(0.05);
+          expect(d).toBeGreaterThan(-1.1);
+        });
+      });
+    });
+  });
+
+  it('dashes circulating lane dividers across open gaps', () => {
+    const { state, model, scene } = roundaboutScene();
+    const { islandR, inscribedR } = model.roundabout;
+    const ringWidth = inscribedR - islandR;
+    const circLanes = Math.max(1, Math.floor((ringWidth - 0.4) / state.laneWidth));
+    expect(circLanes).toBeGreaterThanOrEqual(2); // default core is wide enough
+    const dividerDashes = scene.laneDashes.filter(([p]) => {
+      const r = Math.hypot(p.x, p.y);
+      return r > islandR + 0.1 && r < inscribedR - 0.1;
+    });
+    expect(dividerDashes.length).toBeGreaterThanOrEqual((circLanes - 1) * 6);
+  });
+
   it('marks every entry with a give-way line, triangle and flow arrow', () => {
     const { scene } = roundaboutScene();
     expect(scene.entryMarks).toHaveLength(4);
@@ -71,16 +109,32 @@ describe('roundabout derivation', () => {
     expect(scene.laneDashes.length).toBeGreaterThan(0);
     expect(scene.laneEdges.length).toBeGreaterThan(0);
 
-    // Approach quads start at the geom station R (>= inscribed overlap) and no
-    // surface vertex falls inside the central island.
+    // Every approach starts exactly on the shared seam circle.
     for (const g of model.geoms) {
-      expect(g.R).toBeGreaterThanOrEqual(inscribedR + 0.2);
+      expect(g.R).toBeCloseTo(inscribedR, 9);
     }
     for (const poly of scene.roadSurfaces) {
       for (const p of poly) {
         expect(Math.hypot(p.x, p.y)).toBeGreaterThanOrEqual(model.roundabout.islandR - 0.01);
       }
     }
+  });
+
+  it('trims each approach along the seam arc, not a chord (no gaps to the ring)', () => {
+    const { model, scene } = roundaboutScene();
+    const { inscribedR } = model.roundabout;
+    // Approach polygons contain their far corners; count how many of their
+    // vertices sit exactly on the seam circle. A chord-trimmed arm would have
+    // only its two corner crossings near the radius and a straight run
+    // between them; an arc-trimmed arm carries the full grid slice.
+    let armsWithArcEdge = 0;
+    for (const poly of scene.roadSurfaces) {
+      const hasFarCorner = poly.some((p) => Math.hypot(p.x, p.y) > cfgArmLength(model) - 1e-6);
+      if (!hasFarCorner) continue;
+      const onSeam = poly.filter((p) => Math.abs(Math.hypot(p.x, p.y) - inscribedR) < 1e-6).length;
+      if (onSeam >= 8) armsWithArcEdge += 1;
+    }
+    expect(armsWithArcEdge).toBe(4);
   });
 
   it('wraps sidewalks and curbs around the ring without crossing the island', () => {
