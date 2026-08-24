@@ -228,25 +228,21 @@ function renderTopologyOverlay(geoms, facilities){
     armLength: state.armLength,
     facilities: facilities || [],
   });
+  // Continuous flat ribbons: no per-segment joints or gaps on curves.
+  const addRibbon=(path,width,y,color)=>{
+    if(!path || path.length<2) return;
+    const { ring } = buildSegmentSurface(path, width/2);
+    const mesh = flatPoly(ring, y, color, { rough: 0.5 });
+    if(mesh) topologyGroup.add(mesh);
+  };
+  const runsOf=(entity)=> (entity.runs && entity.runs.length ? entity.runs : [entity.path]);
   topology.laneCenterlines.forEach(cl=>{
     if(cl.skip) return;
-    for(let i=0;i<cl.path.length-1;i++){
-      const seg = boxAlong(cl.path[i],cl.path[i+1],{
-        lateral:0,width:0.12,height:0.05,yBottom:0.12,
-        color:LANE_CENTERLINE_COLOR,rough:0.5,extend:0,
-      });
-      if(seg) topologyGroup.add(seg);
-    }
+    runsOf(cl).forEach(run=>addRibbon(run,0.14,0.125,LANE_CENTERLINE_COLOR));
   });
   topology.connections.forEach(conn=>{
     const color = MOVEMENT_COLORS[conn.movement] || 0xffffff;
-    for(let i=0;i<conn.path.length-1;i++){
-      const seg = boxAlong(conn.path[i],conn.path[i+1],{
-        lateral:0,width:0.16,height:0.06,yBottom:0.13,
-        color,rough:0.5,extend:0,
-      });
-      if(seg) topologyGroup.add(seg);
-    }
+    runsOf(conn).forEach(run=>addRibbon(run,0.18,0.135,color));
   });
   topology.lanes.forEach(lane=>{
     const dotRadius = lane.side==='in' ? 0.16 : 0.12;

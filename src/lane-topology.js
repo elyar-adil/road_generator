@@ -54,7 +54,7 @@ export function connectLanePath(fromG, fromS, toG, toS, { station = 0.5 } = {}) 
     // lanes sweep wider arcs without merging into their neighbours.
     const outerR = Math.max(0, Math.abs(fromS)) || 0;
     const radius = Math.min(22, Math.max(5, 5.5 + outerR * 0.55));
-    const swept = sweptTurn(fromP, fromDir, toP, toDir, radius, 24);
+    const swept = sweptTurn(fromP, fromDir, toP, toDir, radius, 48);
     if (swept && swept.length >= 8) return swept;
   }
   const dist = len(sub(toP, fromP)) || 1;
@@ -62,7 +62,7 @@ export function connectLanePath(fromG, fromS, toG, toS, { station = 0.5 } = {}) 
   const c1 = add(fromP, scl(fromDir, handle));
   const c2 = add(toP, scl(toDir, -handle));
   const path = [fromP];
-  const segments = 24;
+  const segments = 48;
   const fromHandle = scl(fromDir, handle);
   const toHandle = scl(toDir, -handle);
   const p1 = fromP, p2 = add(fromP, fromHandle);
@@ -212,17 +212,18 @@ export function computeLaneTopology(geoms, { armLength = 46, facilities = [] } =
     return path;
   };
 
-  // Collect every guide triangle (导流区) so no topology polyline ever crosses
-  // one: guide triangles are edge-conditioned islands derived around (and never
-  // on) travel-lane centrelines.
+  // Clip polylines against the collected guide triangles. Returns an array of
+  // disjoint runs; concatenating runs would draw phantom chords across islands,
+  // so consumers must render each run separately (`runs`). The flat legacy
+  // `path` is kept for callers/tests that only inspect endpoints.
   const guideTriangles = [];
   (facilities || []).forEach((facility) => {
     const poly = facility?.data?.guidePoly;
     if (!poly || poly.length < 3) return;
     guideTriangles.push(poly);
   });
-  const clipPath = (path) => {
-    if (!path || !guideTriangles.length) return path;
+  const clipToRuns = (path) => {
+    if (!path || !guideTriangles.length) return path ? [path] : [];
     const runs = [];
     let run = [];
     for (const p of path) {
@@ -232,8 +233,7 @@ export function computeLaneTopology(geoms, { armLength = 46, facilities = [] } =
       else if (run.length) { runs.push(run); run = []; }
     }
     if (run.length) runs.push(run);
-    const out = runs.filter((r) => r.length >= 2).flat();
-    return out.length ? out : []; // fully inside a triangle -> no centreline
+    return runs.filter((r) => r.length >= 2);
   };
 
   geoms.forEach((g, i) => {
@@ -291,8 +291,16 @@ export function computeLaneTopology(geoms, { armLength = 46, facilities = [] } =
   });
 
   // Drop any centreline/connection points that fall inside a guide triangle.
-  laneCenterlines.forEach((cl) => { cl.path = clipPath(cl.path) || []; });
-  connections.forEach((conn) => { conn.path = clipPath(conn.path) || []; });
+  // `runs` is the canonical clipped geometry; `path` stays the flattened form
+  // for endpoint-inspecting consumers (never render it directly).
+  laneCenterlines.forEach((cl) => {
+    cl.runs = clipToRuns(cl.path);
+    cl.path = cl.runs.flat();
+  });
+  connections.forEach((conn) => {
+    conn.runs = clipToRuns(conn.path);
+    conn.path = conn.runs.flat();
+  });
 
   return { arms: geoms, lanes, laneCenterlines, connections, laneByKey };
 }

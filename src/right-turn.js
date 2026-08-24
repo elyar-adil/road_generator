@@ -106,7 +106,7 @@ export function buildRightTurnPathData(fromG, toG, type, laneCount, { armLength,
   const c1 = add(sourceAnchor, scl(startDir, handle));
   const c2 = add(targetAnchor, scl(toG.fwd, -handle));
   const path = [sourceAnchor];
-  appendCubic2(path, sourceAnchor, c1, c2, targetAnchor, 30);
+  appendCubic2(path, sourceAnchor, c1, c2, targetAnchor, 48);
   // The branch keeps a constant lane width along its whole centreline. The
   // channelized gore island (guide triangle) separates it from the through road
   // at the split, so the pavement never tapers to a needle nose.
