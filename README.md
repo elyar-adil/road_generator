@@ -74,6 +74,7 @@ intersection-generator/
 │  ├─ project-store.js    自动保存、下载与历史记录
 │  ├─ state.js            项目模型、校验、统计与序列化
 │  ├─ geometry.js         共享 2D 向量/曲线/虚线/offset/fillet 原语（全项目唯一来源）
+│  ├─ frame.js            道路坐标系：直线射线/折线中线两种内核的 (u,s)→世界平面映射（环岛/匝道的地基）
 │  ├─ road-model.js       层1 ROAD：道路几何、连通性、右转设施（纯数据）
 │  ├─ lane-topology.js    层2 LANE：显式车道图与车道中心线（纯数据）
 │  ├─ lane-derive.js      派生层：从道路模型+车道图派生全部标线/设施（纯数据）

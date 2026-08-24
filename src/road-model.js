@@ -16,12 +16,19 @@ import {
   v2, add, scl,
   fillet, lineIntersect,
 } from './geometry.js';
+import { createStraightFrame } from './frame.js';
 
 // Cross-section geometry of a road given lane counts / widths / radius.
+//
+// The road's (u,s) -> world mapping comes from a frame (frame.js): today every
+// arm is a straight ray, but the frame seam lets future node types (curved
+// approaches, ramps, roundabout carriageways) supply any centreline while the
+// geom shape below - and every consumer of it - stays unchanged. g.fwd/g.left
+// remain the core-end tangents used for movement classification and connector
+// start directions.
 function armGeometry(arm, cfg) {
-  const a = arm.angle * Math.PI / 180;
-  const fwd = v2(Math.cos(a), Math.sin(a));
-  const left = v2(-Math.sin(a), Math.cos(a));
+  const frame = createStraightFrame(v2(0, 0), arm.angle);
+  const { fwd, left, wp } = frame;
   const hasTwoWay = arm.laneIn > 0 && arm.laneOut > 0;
   const medW = hasTwoWay && arm.centerMode === 'planted' ? arm.medianWidth : 0;
   const laneW = cfg.laneWidth;
@@ -30,9 +37,8 @@ function armGeometry(arm, cfg) {
   const totalHalf = Math.max(inOuterS, -outOuterS, (inOuterS - outOuterS) / 2);
   const laneBasedRadius = 3.6 + (inOuterS - outOuterS) / 2;
   const R = Math.max(laneBasedRadius, cfg.intersectionSize / 2);
-  const wp = (u, s) => add(scl(fwd, u), scl(left, s));
   return {
-    arm, fwd, left, laneW, medW, inOuterS, outOuterS, totalHalf, R, wp,
+    arm, frame, fwd, left, laneW, medW, inOuterS, outOuterS, totalHalf, R, wp,
     nearLeft: wp(R, inOuterS), nearRight: wp(R, outOuterS),
     farLeft: wp(cfg.armLength, inOuterS), farRight: wp(cfg.armLength, outOuterS),
     nearMedL: wp(R, medW / 2), nearMedR: wp(R, -medW / 2),
