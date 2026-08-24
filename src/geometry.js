@@ -75,7 +75,12 @@ export function fillet(p0, edge0dir, p1, edge1dir, segN) {
 export function sweptTurn(pA, dirA, pB, dirB, radius, segN = 16) {
   const u = normalize(dirA), v = normalize(dirB);
   const nu = leftNormal(u), nv = leftNormal(v);
+  // Overall turn direction from the tangents themselves. Mirror solutions
+  // (arc centre on the wrong side) have the SAME minor-sweep magnitude as the
+  // correct one - only this cross-product sign separates them.
+  const turnSign = Math.sign(u.x * v.y - u.y * v.x);
   let best = null;
+  let bestTravel = Infinity;
   const pick = (s1, s2) => {
     const aO = add(pA, scl(nu, s1 * radius));
     const bO = add(pB, scl(nv, s2 * radius));
@@ -89,19 +94,23 @@ export function sweptTurn(pA, dirA, pB, dirB, radius, segN = 16) {
     if (t1 <= 0.5 || t2 >= -0.5) return;
     const rA = len(sub(C, tA)), rB = len(sub(C, tB));
     if (Math.abs(rA - radius) > radius * 0.4 || Math.abs(rB - radius) > radius * 0.4) return;
-    best = { C, tA, tB };
+    let sweep = Math.atan2(tB.y - C.y, tB.x - C.x) - Math.atan2(tA.y - C.y, tA.x - C.x);
+    while (sweep > Math.PI) sweep -= Math.PI * 2;
+    while (sweep < -Math.PI) sweep += Math.PI * 2;
+    if (turnSign !== 0 && Math.sign(sweep) !== turnSign) return; // mirrored turn
+    // Among same-direction candidates (short arc near the corner vs a giant
+    // detour hugging the far quadrant), pick the SHORTEST drive:
+    // lead-in + lead-out + arc length.
+    const travel = t1 - t2 + Math.abs(sweep) * radius;
+    if (travel < bestTravel) {
+      bestTravel = travel;
+      best = { C, tA, tB, sweep };
+    }
   };
   pick(1, 1); pick(1, -1); pick(-1, 1); pick(-1, -1);
   if (!best) return null;
-  const { C, tA, tB } = best;
+  const { C, tA, tB, sweep } = best;
   const startAng = Math.atan2(tA.y - C.y, tA.x - C.x);
-  const endAng = Math.atan2(tB.y - C.y, tB.x - C.x);
-  // Shortest signed arc from approach tangent to departure tangent (the vehicle
-  // turns through <180°), taking the direction that leads from startAng to
-  // endAng. This yields the minor quarter-arc for left/right turns.
-  let sweep = endAng - startAng;
-  while (sweep > Math.PI) sweep -= Math.PI * 2;
-  while (sweep < -Math.PI) sweep += Math.PI * 2;
   // Straight lead-in from pA to tA, then arc, then straight lead-out tB to pB.
   const path = [cloneV(pA), cloneV(tA)];
   for (let i = 1; i < segN; i += 1) {

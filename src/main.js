@@ -31,7 +31,7 @@ import { classifyArmMovement } from './road-movements.js';
 import { computeLaneTopology } from './lane-topology.js';
 import { buildRoadModel } from './road-model.js';
 import { deriveRoadScene } from './lane-derive.js';
-import { renderRoadScene, ROAD_THEME, matStd, boxAlong, flatPoly, glowMat } from './render.js';
+import { renderRoadScene, ROAD_THEME, matStd, boxAlong, flatPoly, pathRibbon, glowMat } from './render.js';
 import {
   buildLaneTaper, buildSegmentSurface, buildSidewalkBounds,
   laneBundleBounds, placeStreetLights,
@@ -228,11 +228,10 @@ function renderTopologyOverlay(geoms, facilities){
     armLength: state.armLength,
     facilities: facilities || [],
   });
-  // Continuous flat ribbons: no per-segment joints or gaps on curves.
+  // Continuous thin strips built as explicit triangle strips: no joints, no
+  // ear-cutting artifacts.
   const addRibbon=(path,width,y,color)=>{
-    if(!path || path.length<2) return;
-    const { ring } = buildSegmentSurface(path, width/2);
-    const mesh = flatPoly(ring, y, color, { rough: 0.5 });
+    const mesh = pathRibbon(path, width, y, color, { rough: 0.5 });
     if(mesh) topologyGroup.add(mesh);
   };
   const runsOf=(entity)=> (entity.runs && entity.runs.length ? entity.runs : [entity.path]);

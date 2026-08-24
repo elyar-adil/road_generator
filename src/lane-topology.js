@@ -58,7 +58,9 @@ export function connectLanePath(fromG, fromS, toG, toS, { station = 0.5 } = {}) 
     if (swept && swept.length >= 8) return swept;
   }
   const dist = len(sub(toP, fromP)) || 1;
-  const handle = Math.max(3, Math.min(dist * 0.35, 16));
+  // A handle near half the chord makes the cubic one continuous, gently
+  // curving S from entry to exit - not "straight, bend, straight".
+  const handle = Math.max(4, Math.min(dist * 0.5, 24));
   const c1 = add(fromP, scl(fromDir, handle));
   const c2 = add(toP, scl(toDir, -handle));
   const path = [fromP];

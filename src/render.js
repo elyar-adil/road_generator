@@ -107,6 +107,42 @@ export function flatPoly(pts2D, y, color, { rough = 0.9 } = {}) {
   return mesh;
 }
 
+// Thin flat strip along an open polyline (centreline overlay etc.). Built as
+// an explicit triangle strip - never passed through the ear-cutting
+// triangulator, whose flipped ears turn dense near-collinear slivers into
+// garbage polygons.
+export function pathRibbon(path, width, y, color, { rough = 0.9 } = {}) {
+  if (!path || path.length < 2) return null;
+  const half = width / 2;
+  const left = [], right = [];
+  for (let i = 0; i < path.length; i += 1) {
+    const prev = path[Math.max(0, i - 1)], next = path[Math.min(path.length - 1, i + 1)];
+    const t = sub(next, prev);
+    const tl = len(t) || 1;
+    const nx = t.y / tl, ny = -t.x / tl; // right normal of the tangent
+    left.push(add(path[i], scl({ x: nx, y: ny }, -half)));
+    right.push(add(path[i], scl({ x: nx, y: ny }, half)));
+  }
+  const count = path.length;
+  const positions = new Float32Array(count * 2 * 3);
+  for (let i = 0; i < count; i += 1) {
+    positions[i * 6 + 0] = left[i].x; positions[i * 6 + 1] = y; positions[i * 6 + 2] = left[i].y;
+    positions[i * 6 + 3] = right[i].x; positions[i * 6 + 4] = y; positions[i * 6 + 5] = right[i].y;
+  }
+  const indices = [];
+  for (let i = 0; i < count - 1; i += 1) {
+    const l0 = i * 2, r0 = i * 2 + 1, l1 = i * 2 + 2, r1 = i * 2 + 3;
+    indices.push(l0, r0, l1, r1, l1, r0);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, matStd(color, rough));
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
 // ---------------------------------------------------------------- MARK BATCHING
 
 // Template data of a unit cube; every batched marking box is an affine
