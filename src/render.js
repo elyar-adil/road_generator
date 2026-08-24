@@ -3,6 +3,10 @@
 // Everything here is presentation: materials, heights, colours. Geometry and
 // placement decisions live in the derivation layer, so a different renderer
 // (or an export pipeline) can consume the same scene data.
+//
+// Markings/surfaces are accumulated into a MarkBatch and flushed as one merged
+// mesh per material (+cast-shadow variant), keeping draw calls in the low tens
+// instead of one-per-dash.
 
 import * as THREE from 'three';
 import {
@@ -58,6 +62,8 @@ function lampMaterial(hex) {
   return glowCache.get(key);
 }
 
+// ---------------------------------------------------------------- MESH PRIMITIVES
+
 export function boxAlong(p0, p1, opt) {
   const dx = p1.x - p0.x, dz = p1.y - p0.y;
   const segLen = Math.hypot(dx, dz);
@@ -101,7 +107,107 @@ export function flatPoly(pts2D, y, color, { rough = 0.9 } = {}) {
   return mesh;
 }
 
-function pathStrip(path, width, offset, theme) {
+// ---------------------------------------------------------------- MARK BATCHING
+
+// Template data of a unit cube; every batched marking box is an affine
+// (scale -> rotate Y -> translate) copy of these vertices.
+const UNIT_BOX = new THREE.BoxGeometry(1, 1, 1);
+const BOX_POS = UNIT_BOX.attributes.position.array;
+const BOX_NORM = UNIT_BOX.attributes.normal.array;
+const BOX_UV = UNIT_BOX.attributes.uv.array;
+const BOX_IDX = UNIT_BOX.index.array;
+const BOX_VERT_COUNT = BOX_POS.length / 3;
+
+function pushBatchBox(part, p0, p1, opt) {
+  const dx = p1.x - p0.x, dz = p1.y - p0.y;
+  const segLen = Math.hypot(dx, dz);
+  if (segLen < 1e-5) return;
+  const ang = Math.atan2(dz, dx);
+  const nx = -Math.sin(ang), nz = Math.cos(ang);
+  const lateral = opt.lateral || 0;
+  const extend = opt.extend !== undefined ? opt.extend : 0.15;
+  const cx = (p0.x + p1.x) / 2 + nx * lateral;
+  const cz = (p0.y + p1.y) / 2 + nz * lateral;
+  const sx = segLen + extend, sy = opt.height, sz = opt.width;
+  const cy = (opt.yBottom || 0) + sy / 2;
+  const cos = Math.cos(-ang), sin = Math.sin(-ang);
+  const start = part.vertexCount;
+  for (let i = 0; i < BOX_POS.length; i += 3) {
+    const x = BOX_POS[i] * sx, y = BOX_POS[i + 1] * sy, z = BOX_POS[i + 2] * sz;
+    part.positions.push(x * cos + z * sin + cx, y + cy, -x * sin + z * cos + cz);
+    const nxv = BOX_NORM[i], nyv = BOX_NORM[i + 1], nzv = BOX_NORM[i + 2];
+    part.normals.push(nxv * cos + nzv * sin, nyv, -nxv * sin + nzv * cos);
+  }
+  for (let i = 0; i < BOX_UV.length; i += 1) part.uvs.push(BOX_UV[i]);
+  for (let i = 0; i < BOX_IDX.length; i += 1) part.indices.push(BOX_IDX[i] + start);
+  part.vertexCount += BOX_VERT_COUNT;
+}
+
+function pushBatchPoly(part, pts, y) {
+  const shapePts = pts.map((p) => new THREE.Vector2(p.x, p.y));
+  let faces;
+  try {
+    faces = THREE.ShapeUtils.triangulateShape(shapePts, []);
+  } catch (e) {
+    return false;
+  }
+  const start = part.vertexCount;
+  for (const p of pts) {
+    part.positions.push(p.x, y, p.y);
+    part.normals.push(0, 1, 0);
+    part.uvs.push(0, 0);
+  }
+  part.vertexCount += pts.length;
+  for (const f of faces) part.indices.push(f[0] + start, f[1] + start, f[2] + start);
+  return true;
+}
+
+// Accumulates boxes and flat polygons grouped by (material, castShadow) and
+// flushes them as one merged BufferGeometry mesh per group.
+export class MarkBatch {
+  constructor() {
+    this.parts = new Map();
+  }
+
+  part(color, rough, cast) {
+    const key = `${color}|${rough}|${cast ? 1 : 0}`;
+    let part = this.parts.get(key);
+    if (!part) {
+      part = { positions: [], normals: [], uvs: [], indices: [], vertexCount: 0, cast };
+      this.parts.set(key, part);
+    }
+    return part;
+  }
+
+  box(p0, p1, opt) {
+    const color = opt.color === undefined ? ROAD_THEME.curb : opt.color;
+    const rough = opt.rough === undefined ? 0.9 : opt.rough;
+    pushBatchBox(this.part(color, rough, Boolean(opt.castShadow)), p0, p1, opt);
+  }
+
+  poly(pts, y, color, rough = 0.9) {
+    if (!pts || pts.length < 3) return null;
+    return pushBatchPoly(this.part(color, rough, false), pts, y);
+  }
+
+  flush(group) {
+    this.parts.forEach((part, key) => {
+      if (!part.indices.length) return;
+      const [color, rough, cast] = key.split('|');
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(part.positions, 3));
+      geo.setAttribute('normal', new THREE.Float32BufferAttribute(part.normals, 3));
+      geo.setAttribute('uv', new THREE.Float32BufferAttribute(part.uvs, 2));
+      geo.setIndex(part.indices);
+      const mesh = new THREE.Mesh(geo, matStd(Number(color), Number(rough)));
+      mesh.castShadow = cast === '1';
+      mesh.receiveShadow = true;
+      group.add(mesh);
+    });
+  }
+}
+
+function pathStripRing(path, width, offset) {
   if (!path || path.length < 2) return null;
   const outer = [], inner = [];
   for (let i = 0; i < path.length; i += 1) {
@@ -112,35 +218,19 @@ function pathStrip(path, width, offset, theme) {
     outer.push(add(p, scl(normal, offset + width / 2)));
     inner.push(add(p, scl(normal, offset - width / 2)));
   }
-  return flatPoly(outer.concat(inner.reverse()), 0.075, theme.sidewalk, { rough: 1 });
+  return outer.concat(inner.reverse());
 }
 
-function addDashSegments(group, segments, width, yBottom, theme) {
+function addDashSegments(batch, segments, width, yBottom, theme) {
   segments.forEach(([p0, p1]) => {
-    const mesh = boxAlong(p0, p1, {
+    batch.box(p0, p1, {
       lateral: 0, width, height: 0.008, yBottom,
       color: theme.white, rough: 0.6, extend: 0,
     });
-    if (mesh) group.add(mesh);
   });
 }
 
-function addSegment(group, p0, p1, opt, theme) {
-  const mesh = boxAlong(p0, p1, opt);
-  if (mesh) group.add(mesh);
-}
-
-function addCurbs(group, segments, theme) {
-  segments.forEach(([p0, p1]) => {
-    const mesh = boxAlong(p0, p1, {
-      lateral: 0, width: 0.32, height: 0.15, yBottom: 0.0,
-      color: theme.curb, rough: 0.85, extend: 0.05, castShadow: true,
-    });
-    if (mesh) group.add(mesh);
-  });
-}
-
-function addGuardrail(group, rail, theme) {
+function addGuardrail(batch, group, rail, theme) {
   const { posts, rail: span, yBottom, height } = rail;
   const railMat = matStd(0xc9cdd2, 0.35);
   posts.forEach((p) => {
@@ -149,20 +239,16 @@ function addGuardrail(group, rail, theme) {
     post.castShadow = true;
     group.add(post);
   });
-  const beam = boxAlong(span.p0, span.p1, {
+  batch.box(span.p0, span.p1, {
     lateral: 0, width: 0.07, height: 0.08, yBottom: yBottom + height * 0.62,
     color: 0xd7dade, rough: 0.35, extend: 0,
   });
-  if (beam) group.add(beam);
 }
 
-function addArrows(group, arrows, theme) {
+function addArrows(batch, arrows, theme) {
   arrows.forEach(({ pts }) => {
     const polys = Array.isArray(pts[0]) ? pts : [pts];
-    polys.forEach((poly) => {
-      const mesh = flatPoly(poly, 0.092, theme.white, { rough: 0.75 });
-      if (mesh) group.add(mesh);
-    });
+    polys.forEach((poly) => batch.poly(poly, 0.092, theme.white, 0.75));
   });
 }
 
@@ -194,108 +280,96 @@ function buildTrafficLight(theme) {
 // Render a derived scene into `group`. Returns { lampSets } for animation.
 export function renderRoadScene(derived, group, theme = ROAD_THEME) {
   const lampSets = [];
+  const batch = new MarkBatch();
 
   // road surfaces (arm quads + central polygon)
-  derived.roadSurfaces.forEach((pts) => {
-    const mesh = flatPoly(pts, 0.01, theme.asphalt, { rough: 0.95 });
-    if (mesh) group.add(mesh);
-  });
+  derived.roadSurfaces.forEach((pts) => batch.poly(pts, 0.01, theme.asphalt, 0.95));
 
   // median islands
   derived.medianIslands.forEach((pts) => {
-    const top = flatPoly(pts, 0.145, theme.median, { rough: 1 });
-    if (top) group.add(top);
+    batch.poly(pts, 0.145, theme.median, 1);
     for (let i = 0; i < pts.length - 1; i += 1) {
-      const curb = boxAlong(pts[i], pts[i + 1], {
+      batch.box(pts[i], pts[i + 1], {
         lateral: 0, width: 0.18, height: 0.14, yBottom: 0.01,
         color: theme.curb, rough: 0.85, extend: 0.03, castShadow: true,
       });
-      if (curb) group.add(curb);
     }
   });
 
   // double yellow centre lines
   derived.yellowLines.forEach(([p0, p1]) => {
-    const mesh = boxAlong(p0, p1, {
+    batch.box(p0, p1, {
       lateral: 0, width: 0.1, height: 0.01, yBottom: 0.015,
       color: theme.yellow, rough: 0.6, extend: 0,
     });
-    if (mesh) group.add(mesh);
   });
 
   // longitudinal lane dashes + edge lines
-  addDashSegments(group, derived.laneDashes, 0.15, 0.09, theme);
+  addDashSegments(batch, derived.laneDashes, 0.15, 0.09, theme);
   derived.laneEdges.forEach(([p0, p1]) => {
-    const mesh = boxAlong(p0, p1, {
+    batch.box(p0, p1, {
       lateral: 0, width: 0.12, height: 0.008, yBottom: 0.015,
       color: theme.white, rough: 0.6, extend: 0,
     });
-    if (mesh) group.add(mesh);
   });
 
   // guardrails
-  derived.guardrails.forEach((rail) => addGuardrail(group, rail, theme));
+  derived.guardrails.forEach((rail) => addGuardrail(batch, group, rail, theme));
 
   // stop lines
   derived.stopLines.forEach(([p0, p1]) => {
-    const mesh = boxAlong(p0, p1, {
+    batch.box(p0, p1, {
       lateral: 0, width: 0.5, height: 0.01, yBottom: 0.09,
       color: theme.white, rough: 0.6, extend: 0,
     });
-    if (mesh) group.add(mesh);
   });
 
   // crosswalks
   derived.crosswalks.forEach(({ bars }) => {
     bars.forEach(([p0, p1]) => {
-      const mesh = boxAlong(p0, p1, {
+      batch.box(p0, p1, {
         lateral: 0, width: 0.5, height: 0.006, yBottom: 0.014,
         color: theme.white, rough: 0.6, extend: 0,
       });
-      if (mesh) group.add(mesh);
     });
   });
 
   // right-turn branch pedestrian crossings + yield lines
   derived.branchCrossings.forEach(([p0, p1]) => {
-    const mesh = boxAlong(p0, p1, {
+    batch.box(p0, p1, {
       lateral: 0, width: 0.42, height: 0.008, yBottom: 0.092,
       color: theme.white, rough: 0.6, extend: 0,
     });
-    if (mesh) group.add(mesh);
   });
   derived.branchYieldLines.forEach(([p0, p1]) => {
-    const mesh = boxAlong(p0, p1, {
+    batch.box(p0, p1, {
       lateral: 0, width: 0.32, height: 0.01, yBottom: 0.094,
       color: theme.white, rough: 0.6, extend: 0,
     });
-    if (mesh) group.add(mesh);
   });
 
   // arrows
-  addArrows(group, derived.arrows, theme);
+  addArrows(batch, derived.arrows, theme);
 
   // waiting areas: surface + dashed side lines + closing stop line + arrows
   derived.waitingAreas.forEach((wa) => {
-    const surface = flatPoly(wa.left.concat(wa.right.slice().reverse()), 0.013, theme.waitingSurface, { rough: 1 });
-    if (surface) group.add(surface);
-    addDashSegments(group, wa.dashes, 0.15, 0.09, theme);
-    addSegment(group, wa.left.at(-1), wa.right.at(-1), {
+    batch.poly(wa.left.concat(wa.right.slice().reverse()), 0.013, theme.waitingSurface, 1);
+    addDashSegments(batch, wa.dashes, 0.15, 0.09, theme);
+    batch.box(wa.left.at(-1), wa.right.at(-1), {
       lateral: 0, width: 0.5, height: 0.01, yBottom: 0.09,
       color: theme.white, rough: 0.6, extend: 0,
-    }, theme);
-    addArrows(group, wa.arrows.map((pts) => ({ pts })), theme);
+    });
+    addArrows(batch, wa.arrows.map((pts) => ({ pts })), theme);
   });
 
   // guide areas: planted -> raised island with curb ring; hatched -> flat with
   // white boundary edge
   derived.guideAreas.forEach(({ pts, planted }) => {
     if (!pts) return;
-    const surface = flatPoly(pts, planted ? 0.145 : 0.086, planted ? theme.median : theme.asphalt, { rough: 1 });
-    if (surface) group.add(surface);
+    batch.poly(pts, planted ? 0.145 : 0.086, planted ? theme.median : theme.asphalt, 1);
     for (let index = 0; index < pts.length; index += 1) {
       const next = (index + 1) % pts.length;
-      const edge = boxAlong(pts[index], pts[next], planted
+      batch.box(pts[index], pts[next], planted
         ? {
             lateral: 0, width: 0.18, height: 0.14, yBottom: 0.02,
             color: theme.curb, rough: 0.85, extend: 0.03, castShadow: true,
@@ -304,29 +378,33 @@ export function renderRoadScene(derived, group, theme = ROAD_THEME) {
             lateral: 0, width: 0.15, height: 0.008, yBottom: 0.094,
             color: theme.white, rough: 0.6, extend: 0,
           });
-      if (edge) group.add(edge);
     }
   });
 
   // guide chevrons
-  addDashSegments(group, derived.guideChevrons.map(([p0, p1]) => [p0, p1]), 0.35, 0.096, theme);
+  addDashSegments(batch, derived.guideChevrons.map(([p0, p1]) => [p0, p1]), 0.35, 0.096, theme);
 
   // sidewalks + curbs
   derived.sidewalks.forEach((sw) => {
-    const strip = pathStrip(sw.path, sw.width, sw.offset, theme);
-    if (strip) group.add(strip);
+    const ring = pathStripRing(sw.path, sw.width, sw.offset);
+    if (ring) batch.poly(ring, 0.075, theme.sidewalk, 1);
   });
-  addCurbs(group, derived.curbs, theme);
+  derived.curbs.forEach(([p0, p1]) => {
+    batch.box(p0, p1, {
+      lateral: 0, width: 0.32, height: 0.15, yBottom: 0.0,
+      color: theme.curb, rough: 0.85, extend: 0.05, castShadow: true,
+    });
+  });
 
   // right-turn branch surfaces + dividers
-  derived.branchSurfaces.forEach(({ pts }) => {
-    const surface = flatPoly(pts, 0.082, theme.asphalt, { rough: 0.95 });
-    if (surface) group.add(surface);
-  });
+  derived.branchSurfaces.forEach(({ pts }) => batch.poly(pts, 0.082, theme.asphalt, 0.95));
   // branch dividers (dashed, waiting-area cadence)
   derived.branchDividers.forEach((div) => {
-    addDashSegments(group, buildDashedSegments(div, 1.0, 1.0), 0.15, 0.09, theme);
+    addDashSegments(batch, buildDashedSegments(div, 1.0, 1.0), 0.15, 0.09, theme);
   });
+
+  // flush all merged marking/surface meshes into the group
+  batch.flush(group);
 
   // traffic lights
   derived.trafficLights.forEach(({ pos, heading }) => {
