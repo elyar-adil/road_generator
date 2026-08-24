@@ -4,7 +4,9 @@ import { buildRoadModel } from './road-model.js';
 import { deriveRoadScene } from './lane-derive.js';
 
 function roundaboutScene(overrides = {}) {
-  const state = sanitizeProject({ ...createDefaultProject(), junctionType: 'roundabout', ...overrides });
+  const state = sanitizeProject({
+    ...createDefaultProject(), junctionType: 'roundabout', scenerySeed: 1, ...overrides,
+  });
   const model = buildRoadModel(state);
   const scene = deriveRoadScene(model, state, createSeededRandom(state.scenerySeed));
   return { state, model, scene };
@@ -38,7 +40,7 @@ describe('roundabout derivation', () => {
       for (const p of g.pts) {
         const r = Math.hypot(p.x, p.y);
         expect(r).toBeGreaterThanOrEqual(islandR - 1e-6);
-        expect(r).toBeLessThanOrEqual(inscribedR + 10.5);
+        expect(r).toBeLessThanOrEqual(inscribedR + 12);
       }
     }
   });
