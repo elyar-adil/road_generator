@@ -198,6 +198,25 @@ function pushBatchPoly(part, pts, y) {
   return true;
 }
 
+function pushBatchStrip(part, first, second, y) {
+  const count = Math.min(first?.length || 0, second?.length || 0);
+  if (count < 2) return false;
+  const start = part.vertexCount;
+  for (let index = 0; index < count; index += 1) {
+    for (const point of [first[index], second[index]]) {
+      part.positions.push(point.x, y, point.y);
+      part.normals.push(0, 1, 0);
+      part.uvs.push(0, 0);
+    }
+  }
+  part.vertexCount += count * 2;
+  for (let index = 0; index < count - 1; index += 1) {
+    const a = start + index * 2;
+    part.indices.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+  }
+  return true;
+}
+
 // Accumulates boxes and flat polygons grouped by (material, castShadow) and
 // flushes them as one merged BufferGeometry mesh per group.
 export class MarkBatch {
@@ -224,6 +243,10 @@ export class MarkBatch {
   poly(pts, y, color, rough = 0.9) {
     if (!pts || pts.length < 3) return null;
     return pushBatchPoly(this.part(color, rough, false), pts, y);
+  }
+
+  strip(first, second, y, color, rough = 0.9) {
+    return pushBatchStrip(this.part(color, rough, false), first, second, y);
   }
 
   flush(group) {
@@ -321,6 +344,10 @@ export function renderRoadScene(derived, group, theme = ROAD_THEME) {
   // road surfaces: plain point arrays render at base height; {pts, y} entries
   // layer above (roundabout branch ribbons overlap stems/annulus).
   derived.roadSurfaces.forEach((entry) => {
+    if (!Array.isArray(entry) && entry.strips) {
+      batch.strip(entry.strips[0], entry.strips[1], entry.y ?? 0.01, theme.asphalt, 0.95);
+      return;
+    }
     const pts = Array.isArray(entry) ? entry : entry.pts;
     const y = Array.isArray(entry) ? 0.01 : (entry.y ?? 0.01);
     batch.poly(pts, y, theme.asphalt, 0.95);

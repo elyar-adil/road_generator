@@ -186,6 +186,9 @@ export function buildRoadModel(state) {
     // exact same seam circle (a per-arm radius would leave gaps).
     updateArmRadii(geoms, cfg);
     const coreR = Math.max(baseLayout.inscribedR, ...geoms.map((g) => g.R), 12);
+    const widestLanes = arms.reduce((max, arm) => Math.max(max, arm.laneIn, arm.laneOut), 1);
+    const requiredForkReach = Math.max(coreR * 0.42, widestLanes * cfg.laneWidth * 0.7 + 2);
+    cfg.armLength = Math.max(cfg.armLength, Math.ceil(coreR + requiredForkReach + 5));
     geoms.forEach((g) => {
       g.R = coreR;
       g.leftR = coreR;
@@ -194,13 +197,16 @@ export function buildRoadModel(state) {
       g.nearRight = g.wp(g.R, g.outOuterS);
       g.nearMedL = g.wp(g.R, g.medW / 2);
       g.nearMedR = g.wp(g.R, -g.medW / 2);
+      g.farLeft = g.wp(cfg.armLength, g.inOuterS);
+      g.farRight = g.wp(cfg.armLength, g.outOuterS);
+      g.farMedL = g.wp(cfg.armLength, g.medW / 2);
+      g.farMedR = g.wp(cfg.armLength, -g.medW / 2);
     });
     const roundabout = {
       inscribedR: coreR,
-      circWidth: Math.max(4.5, coreR - baseLayout.islandR),
-      islandR: baseLayout.islandR,
-      // Ring lane count grows if the unified core radius widened the carriageway.
-      circLanes: Math.max(baseLayout.circLanes, Math.floor(Math.max(4.5, coreR - baseLayout.islandR) / cfg.laneWidth)),
+      circWidth: baseLayout.circWidth,
+      islandR: coreR - baseLayout.circWidth,
+      circLanes: baseLayout.circLanes,
     };
     return {
       geoms,

@@ -14,7 +14,7 @@ function roundaboutScene(overrides = {}) {
 
 const cfgArmLength = (model) => model.cfg.armLength;
 
-// roadSurfaces entries may be plain point arrays or {pts, y} layered ribbons.
+// roadSurfaces entries may be plain point arrays or layered branch surfaces.
 const surfacePolys = (scene) => scene.roadSurfaces.map((e) => (Array.isArray(e) ? e : e.pts));
 
 describe('roundabout derivation', () => {
@@ -40,7 +40,7 @@ describe('roundabout derivation', () => {
       for (const p of g.pts) {
         const r = Math.hypot(p.x, p.y);
         expect(r).toBeGreaterThanOrEqual(islandR - 1e-6);
-        expect(r).toBeLessThanOrEqual(inscribedR + 12);
+        expect(r).toBeLessThanOrEqual(model.cfg.armLength + 0.01);
       }
     }
   });
@@ -55,9 +55,8 @@ describe('roundabout derivation', () => {
     expect(scene.crosswalks).toHaveLength(4);
   });
 
-  it('keeps every entry yield arc on its own arm sector (branch-cut regression)', () => {
+  it('keeps every entry yield line on its own arm sector (branch-cut regression)', () => {
     const { model, scene } = roundaboutScene();
-    const { inscribedR } = model.roundabout;
     // The default project includes an arm pointing at exactly 180 deg, whose
     // crossings straddle the atan2 branch cut.
     scene.entryMarks.forEach((entry) => {
@@ -66,13 +65,11 @@ describe('roundabout derivation', () => {
       expect(entry.dashes.length).toBeLessThan(30); // never a map-wide sweep
       entry.dashes.forEach(([p0, p1]) => {
         [p0, p1].forEach((p) => {
-          expect(Math.abs(Math.hypot(p.x, p.y) - (inscribedR + 0.12))).toBeLessThan(0.05);
+          expect(Math.hypot(p.x, p.y)).toBeLessThan(model.cfg.armLength);
           let d = Math.atan2(p.y, p.x) - axis;
           while (d > Math.PI) d -= Math.PI * 2;
           while (d < -Math.PI) d += Math.PI * 2;
-          // Inbound lanes sit clockwise of the axis.
-          expect(d).toBeLessThan(0.05);
-          expect(d).toBeGreaterThan(-1.1);
+          expect(Math.abs(d)).toBeLessThan(1.25);
         });
       });
     });
@@ -109,12 +106,12 @@ describe('roundabout derivation', () => {
   });
 
   it('keeps approach markings but truncates pavement at the circle', () => {
-    const { model, scene } = roundaboutScene();
+    const { state, model, scene } = roundaboutScene();
     const { inscribedR } = model.roundabout;
     expect(scene.laneDashes.length).toBeGreaterThan(0);
     expect(scene.laneEdges.length).toBeGreaterThan(0);
 
-    // Every approach starts exactly on the shared seam circle.
+    // Every approach centreline starts on the shared seam circle.
     for (const g of model.geoms) {
       expect(g.R).toBeCloseTo(inscribedR, 9);
     }
@@ -126,31 +123,35 @@ describe('roundabout derivation', () => {
   });
 
   it('lands every branch ribbon on the seam circle (no gaps to the ring)', () => {
-    const { model, scene } = roundaboutScene();
+    const { state, model, scene } = roundaboutScene();
     const { inscribedR } = model.roundabout;
     // Branch ribbons are layered closed rings: they must span from the fork
     // all the way in to the seam so pavement meets the ring gap-free.
     const ribbons = scene.roadSurfaces.filter((e) => !Array.isArray(e));
     expect(ribbons).toHaveLength(8); // entry + exit per 4 approaches
-    for (const { pts } of ribbons) {
+    for (const { pts, strips } of ribbons) {
       const radii = pts.map((p) => Math.hypot(p.x, p.y));
-      expect(Math.min(...radii)).toBeLessThanOrEqual(inscribedR + 0.8);
+      expect(Math.min(...radii)).toBeLessThan(inscribedR);
+      expect(Math.max(...radii)).toBeGreaterThan(inscribedR);
       expect(Math.max(...radii)).toBeGreaterThanOrEqual(inscribedR + 8.2);
+      expect(strips).toHaveLength(2);
+      const seamRadii = strips.map((boundary) => {
+        const firstR = Math.hypot(boundary[0].x, boundary[0].y);
+        const lastR = Math.hypot(boundary.at(-1).x, boundary.at(-1).y);
+        return Math.min(firstR, lastR);
+      });
+      expect(Math.min(...seamRadii)).toBeLessThan(inscribedR);
+      expect(Math.max(...seamRadii)).toBeCloseTo(inscribedR, 9);
     }
   });
 
-  it('wraps sidewalks and curbs around the ring without crossing the island', () => {
+  it('does not create detached ring bands outside the approaches', () => {
     const { model, scene } = roundaboutScene();
-    expect(scene.sidewalks).toHaveLength(4);
-    // Each gap contributes arm-edge + arc curb segments; the ring is fully covered.
-    expect(scene.curbs.length).toBeGreaterThanOrEqual(4 * 8);
-    const limit = model.roundabout.islandR - 0.01;
-    for (const sw of scene.sidewalks) {
-      expect(sw.path.length).toBeGreaterThanOrEqual(6);
-      for (const p of sw.path) {
-        expect(Math.hypot(p.x, p.y)).toBeGreaterThan(limit);
-      }
-    }
+    expect(scene.sidewalks).toHaveLength(0);
+    expect(scene.curbs).toHaveLength(8);
+    scene.curbs.flat().forEach((point) => {
+      expect(Math.hypot(point.x, point.y)).toBeGreaterThan(model.roundabout.inscribedR);
+    });
     // One street lamp per splitter nose.
     expect(scene.streetLamps).toHaveLength(4);
   });

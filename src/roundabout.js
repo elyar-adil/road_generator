@@ -14,20 +14,18 @@
 
 import { createStraightFrame } from './frame.js';
 import {
-  add, scl, sub, len, normalize, dot,
-  lineIntersect, EPSILON,
+  add, scl, sub, len, normalize, offsetPolyline,
 } from './geometry.js';
 
 const TAU = Math.PI * 2;
 
 export function computeRoundaboutLayout({ arms, laneWidth, intersectionSize }) {
-  const inscribedR = Math.max(12, intersectionSize / 2);
-  // The circulating carriageway is a real multi-lane road: its lane count
-  // matches the busiest approach's one-way bundle (clamped to sane rotaries).
   const widestLanes = arms.reduce((max, arm) => Math.max(max, arm.laneIn, arm.laneOut), 1);
-  const circLanes = Math.min(3, Math.max(1, widestLanes));
-  const circWidth = Math.max(laneWidth * 1.15, circLanes * laneWidth);
-  const islandR = Math.max(4, inscribedR - circWidth);
+  const circLanes = Math.max(1, widestLanes);
+  const circWidth = circLanes * laneWidth;
+  const islandClearance = Math.max(4, laneWidth * 1.25);
+  const inscribedR = Math.max(12, intersectionSize / 2, circWidth + islandClearance);
+  const islandR = inscribedR - circWidth;
   return { inscribedR, circLanes, circWidth, islandR };
 }
 
@@ -59,6 +57,27 @@ export function annulusSectorQuads(center, rInner, rOuter, segments = 48) {
   return quads;
 }
 
+export function roundaboutArmSlots(anglesDeg) {
+  const angles = anglesDeg.map((angle) => angle * Math.PI / 180);
+  return angles.map((theta, index) => {
+    let previous = angles[(index - 1 + angles.length) % angles.length];
+    let next = angles[(index + 1) % angles.length];
+    while (previous >= theta) previous -= TAU;
+    while (next <= theta) next += TAU;
+    const lowerBisector = (previous + theta) / 2;
+    const upperBisector = (theta + next) / 2;
+    return {
+      lowerBisector,
+      upperBisector,
+      // The upper gap bisector is shared with the next arm: this arm enters
+      // there and the next arm exits there. The lower one is shared with the
+      // previous arm in the same way.
+      footIn: upperBisector,
+      footOut: lowerBisector,
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Approach Y-geometry.
 //
@@ -69,7 +88,7 @@ export function annulusSectorQuads(center, rInner, rOuter, segments = 48) {
 // circle. Everything below is pure data consumed by the derivation layer.
 // ---------------------------------------------------------------------------
 
-function cubicSample(p0, c1, c2, p3, segments = 26) {
+function cubicSample(p0, c1, c2, p3, segments = 128) {
   const pts = [];
   for (let i = 0; i <= segments; i += 1) {
     const t = i / segments, m = 1 - t;
@@ -81,110 +100,213 @@ function cubicSample(p0, c1, c2, p3, segments = 26) {
   return pts;
 }
 
-// Branch centreline: straight run colinear with the stem, one constant-radius
-// arc, straight lead-out arriving EXACTLY along the ring tangent. Among the
-// two tangent-continuous solutions we keep only the one whose arc centre sits
-// on the same side of the chord as `hugPoint` - the small corner arc hugging
-// the island, never the giant detour loop around the far quadrant.
-function hugArc(start, u, end, v, r, hugPoint, segN = 26) {
-  const un = normalize(u), vn = normalize(v);
-  const nu = { x: -un.y, y: un.x }, nv = { x: -vn.y, y: vn.x };
-  const c1 = add(start, scl(nu, r));
-  const c2 = sub(end, scl(nv, r));
-  const C = lineIntersect(c1, add(c1, un), c2, add(c2, vn));
-  if (!C) return null;
-  // Tangency must sit ahead on the entry run and behind on the exit run.
-  if (dot(sub(C, start), un) <= EPSILON || dot(sub(C, end), vn) >= -EPSILON) return null;
-  const t1 = sub(C, scl(nu, r));
-  const t2 = sub(C, scl(nv, r));
-  const chord = sub(end, start);
-  const side = (p) => Math.sign(chord.x * (p.y - start.y) - chord.y * (p.x - start.x));
-  const centreSide = side(C);
-  if (centreSide === 0 || centreSide !== side(hugPoint)) return null;
-
-  let sweep = Math.atan2(t2.y - C.y, t2.x - C.x) - Math.atan2(t1.y - C.y, t1.x - C.x);
-  while (sweep > Math.PI) sweep -= Math.PI * 2;
-  while (sweep < -Math.PI) sweep += Math.PI * 2;
-
-  const path = [{ ...start }, { ...t1 }];
-  for (let i = 1; i < segN; i += 1) {
-    const a = Math.atan2(t1.y - C.y, t1.x - C.x) + sweep * i / segN;
-    path.push({ x: C.x + r * Math.cos(a), y: C.y + r * Math.sin(a) });
-  }
-  path.push({ ...t2 }, { ...end });
-  return path;
-}
-
-function flarePath(start, startDir, end, endDir, halfWidth, hugPoint) {
-  for (const r of [halfWidth * 2.4 + 5, halfWidth * 1.6 + 4, halfWidth + 3, Math.max(4, halfWidth)]) {
-    const path = hugArc(start, startDir, end, endDir, r, hugPoint);
-    if (path && path.length >= 8) return path;
-  }
-  // Last resort: gentle Bezier (rare; only for extreme geometries).
+function tangentCurve(start, startDir, end, endDir, startScale = 0.3, endScale = 0.28) {
   const chord = len(sub(end, start)) || 1;
-  const handle = chord * 0.45;
+  const startHandle = chord * startScale;
+  const endHandle = chord * endScale;
   return cubicSample(
     start,
-    add(start, scl(normalize(startDir), handle)),
-    add(end, scl(normalize(endDir), -handle)),
+    add(start, scl(normalize(startDir), startHandle)),
+    add(end, scl(normalize(endDir), -endHandle)),
     end,
   );
 }
 
 // Geometry of one forked approach. All lengths in metres, angles in radians.
-//   entryPath : stem -> ring, arrives along the CCW ring tangent
-//   exitPath  : ring -> stem, departs along the CCW ring tangent
-//   footIn / footOut : polar angles where the branches meet the seam circle
-export function roundaboutApproach({ angleDeg, coreR, laneWidth, laneIn, laneOut, medW = 0, forkReach = 9 }) {
+//   entryPath : stem -> ring, arrives along the circulating tangent
+//   exitPath  : ring -> stem, departs along the circulating tangent
+//   footIn / footOut : polar angles of the branch mouths
+export function roundaboutApproach({
+  angleDeg, coreR, laneWidth, laneIn, laneOut, medW = 0, forkReach = 9,
+  slotAngle = Math.PI / 4, targetFootIn = null, targetFootOut = null,
+}) {
   const theta = angleDeg * Math.PI / 180;
   const frame = createStraightFrame({ x: 0, y: 0 }, angleDeg);
-  const halfIn = Math.max(laneWidth, laneIn * laneWidth) / 2;
-  const halfOut = Math.max(laneWidth, laneOut * laneWidth) / 2;
+  const widthIn = Math.max(laneWidth, laneIn * laneWidth);
+  const widthOut = Math.max(laneWidth, laneOut * laneWidth);
+  const halfIn = widthIn / 2;
+  const halfOut = widthOut / 2;
 
-  // Foot angular offsets keep the branch's outer edge clear of the island nose.
-  const deltaIn = Math.asin(Math.min(0.6, (halfIn + 1.1) / coreR));
-  const deltaOut = Math.asin(Math.min(0.6, (halfOut + 1.1) / coreR));
-  const footIn = theta - deltaIn;   // inbound side = clockwise of the axis
-  const footOut = theta + deltaOut; // outbound side = counter-clockwise
+  // Fallback for standalone geometry tests. Scene derivation supplies shared
+  // adjacent-road bisectors through targetFootIn/targetFootOut.
+  const slotOffset = slotAngle / 2;
+  const footIn = targetFootIn ?? theta + (laneIn > 0 && laneOut > 0 ? slotOffset : 0);
+  const footOut = targetFootOut ?? theta - (laneIn > 0 && laneOut > 0 ? slotOffset : 0);
 
-  const ringPoint = (phi) => ({ x: coreR * Math.cos(phi), y: coreR * Math.sin(phi) });
-  // CCW circulation tangent at polar angle phi.
+  const ringPoint = (radius, phi) => ({ x: radius * Math.cos(phi), y: radius * Math.sin(phi) });
+  // Both entry and exit bend to the driver's right, which gives CCW circulation
+  // in the project's world plane.
   const ringTangent = (phi) => ({ x: -Math.sin(phi), y: Math.cos(phi) });
 
-  const forkU = coreR + forkReach;
-  const sIn = -(medW / 2 + halfIn);
-  const sOut = medW / 2 + halfOut;
-
-  const startIn = frame.wp(forkU, sIn);
-  const endIn = ringPoint(footIn);
-  // Hug point = where the axis meets the ring: the arc must stay on the island
-  // side of its chord, giving the compact corner flare of a real Y fork.
-  const hugPoint = ringPoint(theta);
-  const entryPath = flarePath(startIn, scl(frame.fwd, -1), endIn, ringTangent(footIn), halfIn, hugPoint);
-
-  const startOut = ringPoint(footOut);
-  const endOut = frame.wp(forkU, sOut);
-  const exitPath = flarePath(endOut, frame.fwd, startOut, ringTangent(footOut), halfOut, hugPoint);
-  exitPath.reverse(); // store ring -> fork so both paths read outward-in
+  const effectiveForkReach = Math.max(forkReach, Math.max(widthIn, widthOut) * 0.7 + 2);
+  const forkU = coreR + effectiveForkReach;
+  const inward = scl(frame.fwd, -1);
+  // Each slot owns a radial target segment exactly one branch-width long. Put
+  // the branch centreline through that segment's midpoint and arrive along the
+  // circle tangent; a constant half-width offset then lands its outer edge on
+  // the outside circle and its inner edge one full road width farther inward.
+  const joinRIn = coreR - halfIn;
+  const joinROut = coreR - halfOut;
+  const entryPath = tangentCurve(
+    frame.wp(forkU, medW / 2 + halfIn), inward,
+    ringPoint(joinRIn, footIn), ringTangent(footIn),
+  );
+  const exitPath = tangentCurve(
+    ringPoint(joinROut, footOut), ringTangent(footOut),
+    frame.wp(forkU, -(medW / 2 + halfOut)), frame.fwd, 0.3, 0.3,
+  );
+  const entryOffsets = offsetPolyline(entryPath, halfIn);
+  const exitOffsets = offsetPolyline(exitPath, halfOut);
+  // A constant-distance offset of a curved approach wraps slightly around the
+  // ring: near the seam the edge normals still carry an angular component, so
+  // the outer edge overshoots the slot angle by a few tenths of a degree and
+  // folds back, reversing the final segment against the circulating tangent.
+  // Fix inside the offset model: drop the overshot tail and blend both edges
+  // along concentric arcs onto their radial mouths. The two edges always share
+  // one cutoff index and one arc-angle list, so index-aligned consumers keep
+  // exact branch widths everywhere.
+  const polarAngle = (point) => Math.atan2(point.y, point.x);
+  const angleDelta = (point, base) => {
+    const delta = polarAngle(point) - base;
+    return delta - Math.round(delta / TAU) * TAU;
+  };
+  const SEAM_ARC_POINTS = 6;
+  const blendEntryToSeam = (offsets, joinRadii, footAngle) => {
+    const cuts = offsets.map((points) => {
+      for (let index = points.length - 1; index >= 0; index -= 1) {
+        if (angleDelta(points[index], footAngle) <= 1e-9) return index;
+      }
+      return points.length - 2;
+    });
+    const cut = Math.max(2, Math.min(...cuts));
+    const delta0 = Math.min(0, ...offsets.map((points) => angleDelta(points[cut], footAngle)));
+    const tails = joinRadii.map((radius) => Array.from({ length: SEAM_ARC_POINTS }, (_, step) => {
+      const delta = delta0 * (1 - (step + 1) / SEAM_ARC_POINTS);
+      const angle = footAngle + delta;
+      return { x: radius * Math.cos(angle), y: radius * Math.sin(angle) };
+    }));
+    return offsets.map((points, edge) => [...points.slice(0, cut + 1), ...tails[edge]]);
+  };
+  const blendExitFromSeam = (offsets, joinRadii, footAngle) => {
+    const cuts = offsets.map((points) => {
+      const index = points.findIndex((point) => angleDelta(point, footAngle) >= -1e-9);
+      return index < 0 ? points.length - 2 : index;
+    });
+    const limit = Math.min(...offsets.map((points) => points.length)) - 3;
+    const cut = Math.min(limit, Math.max(...cuts));
+    const delta0 = Math.max(0, ...offsets.map((points) => angleDelta(points[cut], footAngle)));
+    const heads = joinRadii.map((radius) => Array.from({ length: SEAM_ARC_POINTS }, (_, step) => {
+      const delta = delta0 * step / SEAM_ARC_POINTS;
+      const angle = footAngle + delta;
+      return { x: radius * Math.cos(angle), y: radius * Math.sin(angle) };
+    }));
+    return offsets.map((points, edge) => [...heads[edge], ...points.slice(cut)]);
+  };
+  const [entryInner, entryOuter] = blendEntryToSeam(
+    [entryOffsets.left, entryOffsets.right],
+    [coreR - widthIn, coreR], footIn,
+  );
+  const [exitInner, exitOuter] = blendExitFromSeam(
+    [exitOffsets.left, exitOffsets.right],
+    [coreR - widthOut, coreR], footOut,
+  );
+  const entryLast = entryOuter.length - 1;
+  const entryOuterTarget = ringPoint(coreR, footIn);
+  const entryInnerTarget = ringPoint(coreR - widthIn, footIn);
+  entryOuter[entryLast] = entryOuterTarget;
+  entryInner[entryLast] = entryInnerTarget;
+  const exitOuterTarget = ringPoint(coreR, footOut);
+  const exitInnerTarget = ringPoint(coreR - widthOut, footOut);
+  exitOuter[0] = exitOuterTarget;
+  exitInner[0] = exitInnerTarget;
+  const entryRing = entryOuter.concat(entryInner.slice().reverse());
+  const exitRing = exitOuter.concat(exitInner.slice().reverse());
+  const entryOuterFoot = Math.atan2(entryOuter.at(-1).y, entryOuter.at(-1).x);
+  const exitOuterFoot = Math.atan2(exitOuter[0].y, exitOuter[0].x);
 
   return {
     theta, frame, forkU, halfIn, halfOut,
-    entryPath, exitPath, footIn, footOut,
+    entryPath, exitPath, entryInner, entryOuter, exitInner, exitOuter,
+    entrySurface: { outer: entryOuter, inner: entryInner, strips: [entryOuter, entryInner], ring: entryRing },
+    exitSurface: { outer: exitOuter, inner: exitInner, strips: [exitOuter, exitInner], ring: exitRing },
+    footIn, footOut, entryOuterFoot, exitOuterFoot, slotAngle, joinRIn, joinROut,
     ringTangentAtFootIn: ringTangent(footIn),
   };
 }
 
-// Wedge region the forked Y leaves against the seam circle: walked as
-// entry-inner-edge (fork -> ring), seam arc (footIn -> footOut, CCW under the
-// axis), exit-inner-edge (ring -> fork); the closure edge forms the blunt
-// fork-end cap automatically.
-export function forkIslandPolygon({ entryInner, exitInner, coreR, footIn, footOut, seamGrid }) {
-  const step = TAU / seamGrid.length;
-  const i0 = Math.ceil((footIn + 1e-9) / step);
-  const i1 = Math.floor((footOut - 1e-9) / step);
-  const arc = [];
-  for (let k = i0; k <= i1; k += 1) {
-    arc.push(seamGrid[((k % seamGrid.length) + seamGrid.length) % seamGrid.length]);
+function segmentRadiusIntersection(a, b, radius) {
+  const delta = sub(b, a);
+  const aa = delta.x * delta.x + delta.y * delta.y;
+  const bb = 2 * (a.x * delta.x + a.y * delta.y);
+  const cc = a.x * a.x + a.y * a.y - radius * radius;
+  const root = Math.sqrt(Math.max(0, bb * bb - 4 * aa * cc));
+  const candidates = [(-bb - root) / (2 * aa), (-bb + root) / (2 * aa)];
+  const t = candidates.find((value) => value >= -1e-8 && value <= 1 + 1e-8) ?? 0.5;
+  return add(a, scl(delta, Math.max(0, Math.min(1, t))));
+}
+
+function pathPrefixOutsideRadius(path, radius) {
+  if (!path.length) return [];
+  const result = [path[0]];
+  for (let index = 1; index < path.length; index += 1) {
+    const previous = path[index - 1];
+    const point = path[index];
+    if (len(point) >= radius) result.push(point);
+    else {
+      result.push(segmentRadiusIntersection(previous, point, radius));
+      break;
+    }
   }
-  return [...entryInner, ...arc, ...exitInner];
+  return result;
+}
+
+function pathSuffixOutsideRadius(path, radius) {
+  if (!path.length) return [];
+  for (let index = 1; index < path.length; index += 1) {
+    if (len(path[index - 1]) < radius && len(path[index]) >= radius) {
+      return [segmentRadiusIntersection(path[index - 1], path[index], radius), ...path.slice(index)];
+    }
+  }
+  return path.slice();
+}
+
+// Compact splitter island inside the Y. The previous implementation followed
+// both inner edges all the way into the annulus, producing the huge pointed
+// triangles visible in the editor. Stop both sides outside the circle and join
+// them with a short circular nose instead.
+export function forkIslandPolygon({ entryInner, exitInner, coreR, theta = 0, forkU = null, medW = 0 }) {
+  if (!entryInner?.length || !exitInner?.length) return [];
+  const axis = { x: Math.cos(theta), y: Math.sin(theta) };
+  const lateral = { x: -axis.y, y: axis.x };
+  const capU = forkU ?? Math.max(
+    entryInner[0].x * axis.x + entryInner[0].y * axis.y,
+    exitInner.at(-1).x * axis.x + exitInner.at(-1).y * axis.y,
+  );
+  const capHalf = Math.max(0.22, medW / 2);
+  const availableDepth = Math.max(1, capU - coreR);
+  const noseR = coreR + Math.min(3.2, Math.max(1.8, availableDepth * 0.24));
+  const noseHalfAngle = Math.min(0.11, Math.max(0.045, capHalf / noseR + 0.045));
+  const sideSegments = 12;
+  const sideCurve = (from, to, sign) => Array.from({ length: sideSegments + 1 }, (_, index) => {
+    const progress = index / sideSegments;
+    const inverse = 1 - progress;
+    const control = add(scl(axis, coreR + availableDepth * 0.62), scl(lateral, sign * capHalf * 0.55));
+    return add(add(scl(from, inverse * inverse), scl(control, 2 * inverse * progress)), scl(to, progress * progress));
+  });
+  const capLower = add(scl(axis, capU), scl(lateral, -capHalf));
+  const capUpper = add(scl(axis, capU), scl(lateral, capHalf));
+  const noseLower = { x: noseR * Math.cos(theta - noseHalfAngle), y: noseR * Math.sin(theta - noseHalfAngle) };
+  const noseUpper = { x: noseR * Math.cos(theta + noseHalfAngle), y: noseR * Math.sin(theta + noseHalfAngle) };
+  const lowerSide = sideCurve(capLower, noseLower, -1);
+  const upperSide = sideCurve(noseUpper, capUpper, 1);
+  const noseSegments = 6;
+  const noseArc = Array.from({ length: noseSegments + 1 }, (_, index) => {
+    const angle = theta - noseHalfAngle + 2 * noseHalfAngle * index / noseSegments;
+    return { x: noseR * Math.cos(angle), y: noseR * Math.sin(angle) };
+  });
+  return [
+    ...lowerSide,
+    ...noseArc.slice(1, -1),
+    ...upperSide,
+  ];
 }

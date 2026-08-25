@@ -20,11 +20,11 @@ import {
 import { trimBeforeLaneEnvelope } from './waiting-area.js';
 import { armLaneMovementSets, leftTurnCapacity } from './road-movements.js';
 import { buildCornerFillets } from './road-model.js';
-import { buildSegmentSurface } from './segment.js';
 import {
   annulusSectorQuads,
   circlePolygon,
   roundaboutApproach,
+  roundaboutArmSlots,
   forkIslandPolygon,
 } from './roundabout.js';
 
@@ -726,7 +726,7 @@ function scatterScenery(scene, geoms, cfg, state, random) {
 
 // CCW arc polyline on the origin circle between two absolute angles.
 function arcPath(radius, angleFrom, angleTo) {
-  const count = Math.max(4, Math.ceil(Math.abs(angleTo - angleFrom) / 0.12));
+  const count = Math.max(6, Math.ceil(Math.abs(angleTo - angleFrom) / 0.12));
   const pts = [];
   for (let k = 0; k <= count; k += 1) {
     const a = angleFrom + (angleTo - angleFrom) * k / count;
@@ -744,6 +744,15 @@ function unwrapAround(angle, reference) {
   return angle;
 }
 
+function interpolateBoundary(first, second, ratio) {
+  const count = Math.min(first.length, second.length);
+  return Array.from({ length: count }, (_, index) => lerp2(first[index], second[index], ratio));
+}
+
+function addPolylineSegments(target, path) {
+  for (let index = 0; index < path.length - 1; index += 1) target.push([path[index], path[index + 1]]);
+}
+
 export function deriveRoundaboutScene(model, state, random = Math.random) {
   const { geoms, roundabout } = model;
   if (!roundabout) throw new Error('roundabout scene requires a roundabout road model');
@@ -751,63 +760,73 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
   const n = geoms.length;
   const scene = createEmptyScene();
   const coreR = roundabout.inscribedR;
-  const FORK_REACH = 9;
-  // Shared seam-circle vertex grid: identical numbers feed the annulus sectors
-  // below and every island's inner arc edge.
-  const seamGrid = circlePolygon({ x: 0, y: 0 }, coreR, 64);
-
-  const approaches = geoms.map((g) => roundaboutApproach({
+  const armSlots = roundaboutArmSlots(geoms.map((g) => g.arm.angle));
+  const approaches = geoms.map((g, index) => roundaboutApproach({
     angleDeg: g.arm.angle,
     coreR,
     laneWidth: g.laneW,
     laneIn: g.arm.laneIn,
     laneOut: g.arm.laneOut,
     medW: g.medW,
-    forkReach: FORK_REACH,
+    targetFootIn: armSlots[index].footIn,
+    targetFootOut: armSlots[index].footOut,
+    forkReach: Math.min(
+      Math.max(coreR * 0.42, Math.max(g.arm.laneIn, g.arm.laneOut) * g.laneW * 0.7 + 2),
+      Math.max(4, cfg.armLength - coreR - 3),
+    ),
   }));
-
-  // Axis-side edge of a branch ribbon: whichever offset stays closer to the
-  // arm's lateral axis.
-  const innerEdgeOf = (ap, path, half) => {
-    const { left, right } = offsetPolyline(path, half);
-    const score = (edge) => edge.reduce(
-      (acc, p) => acc + Math.abs(p.x * ap.frame.left.x + p.y * ap.frame.left.y), 0,
-    ) / edge.length;
-    return score(left) <= score(right) ? left : right;
-  };
 
   approaches.forEach((ap, i) => {
     const g = geoms[i];
     const arm = g.arm;
     if (arm.laneIn <= 0 && arm.laneOut <= 0) return;
+    const entryOuterS = g.medW / 2 + arm.laneIn * g.laneW;
+    const exitOuterS = -(g.medW / 2 + arm.laneOut * g.laneW);
 
     // stem quad from the fork outward (full two-way section)
     scene.roadSurfaces.push([
-      ap.frame.wp(ap.forkU, g.inOuterS), g.wp(cfg.armLength, g.inOuterS),
-      g.wp(cfg.armLength, g.outOuterS), ap.frame.wp(ap.forkU, g.outOuterS),
+      ap.frame.wp(ap.forkU, entryOuterS), g.wp(cfg.armLength, entryOuterS),
+      g.wp(cfg.armLength, exitOuterS), ap.frame.wp(ap.forkU, exitOuterS),
     ]);
-    // branch ribbons, layered a hair above stems/annulus where they overlap
+    // Explicit boundary strips keep every branch full-width through the Y.
+    // They are rendered as paired strips instead of one dense polygon so the
+    // triangulator cannot bridge across a curved concave mouth.
     if (arm.laneIn > 0) {
-      scene.roadSurfaces.push({ pts: buildSegmentSurface(ap.entryPath, ap.halfIn).ring, y: 0.0105 });
+      scene.roadSurfaces.push({ pts: ap.entrySurface.ring, strips: ap.entrySurface.strips, y: 0.0105 });
+      addPolylineSegments(scene.laneEdges, ap.entryOuter);
+      for (let lane = 1; lane < arm.laneIn; lane += 1) {
+        pathDashes(interpolateBoundary(ap.entryOuter, ap.entryInner, lane / arm.laneIn), {
+          dashLen: 1.2, gapLen: 1.0,
+        }).forEach((segment) => scene.laneDashes.push(segment));
+      }
     }
     if (arm.laneOut > 0) {
-      scene.roadSurfaces.push({ pts: buildSegmentSurface(ap.exitPath, ap.halfOut).ring, y: 0.0105 });
+      scene.roadSurfaces.push({ pts: ap.exitSurface.ring, strips: ap.exitSurface.strips, y: 0.0105 });
+      addPolylineSegments(scene.laneEdges, ap.exitOuter);
+      for (let lane = 1; lane < arm.laneOut; lane += 1) {
+        pathDashes(interpolateBoundary(ap.exitOuter, ap.exitInner, lane / arm.laneOut), {
+          dashLen: 1.2, gapLen: 1.0,
+        }).forEach((segment) => scene.laneDashes.push(segment));
+      }
     }
 
-    // splitter island = the wedge between the Y's inner edges and the seam arc
+    // Compact splitter island between the Y branches; its rounded nose stays
+    // outside the annulus so it cannot become a giant triangular overlay.
     if (arm.laneIn > 0 && arm.laneOut > 0) {
-      const entryInner = innerEdgeOf(ap, ap.entryPath, ap.halfIn);   // fork -> ring
-      const exitInner = innerEdgeOf(ap, ap.exitPath, ap.halfOut);    // ring -> fork
       scene.guideAreas.push({
         pts: forkIslandPolygon({
-          entryInner, exitInner, coreR,
-          footIn: ap.footIn, footOut: ap.footOut, seamGrid,
+          entryInner: ap.entryInner,
+          exitInner: ap.exitInner,
+          coreR,
+          theta: ap.theta,
+          forkU: ap.forkU,
+          medW: g.medW,
         }),
         planted: true,
       });
     }
 
-    const facilityStart = g.R + 0.5;
+    const facilityStart = ap.forkU + 0.5;
     const medianStartU = ap.forkU + 0.4;
 
     // center separation on the approach (identical rules to cross nodes)
@@ -834,17 +853,17 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
         scene.laneEdges.push([g.wp(ap.forkU + 0.4, sOuter), g.wp(cfg.armLength, sOuter)]);
       }
     };
-    drawLaneLines(arm.laneIn, -1);
-    drawLaneLines(arm.laneOut, 1);
+    drawLaneLines(arm.laneIn, 1);
+    drawLaneLines(arm.laneOut, -1);
 
     // side guardrails on the stem
     const sideRailStart = ap.forkU + 1.0;
     const sideRailEnd = cfg.armLength - 0.7;
     if (arm.leftGuardrail) {
-      scene.guardrails.push(guardrailAlongArm(g, sideRailStart, sideRailEnd, g.inOuterS + 0.22, 0.12, 0.82));
+      scene.guardrails.push(guardrailAlongArm(g, sideRailStart, sideRailEnd, entryOuterS + 0.22, 0.12, 0.82));
     }
     if (arm.rightGuardrail) {
-      scene.guardrails.push(guardrailAlongArm(g, sideRailStart, sideRailEnd, g.outOuterS - 0.22, 0.12, 0.82));
+      scene.guardrails.push(guardrailAlongArm(g, sideRailStart, sideRailEnd, exitOuterS - 0.22, 0.12, 0.82));
     }
 
     // street lamp just past the island's blunt outer end
@@ -868,12 +887,14 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
     const ap = approaches[i];
     if (arm.laneIn <= 0) return;
 
-    // dashed give-way line hugging the circle across the entry mouth
-    const span = (ap.halfIn + 0.4) / coreR;
-    const angleFrom = unwrapAround(ap.footIn + span, ap.theta);
-    const angleTo = unwrapAround(ap.footIn - span, ap.theta);
+    // Dashed give-way line crosses the full, constant-width entry bundle at
+    // its allocated slot. With a tangent mouth the two edges differ radially,
+    // not angularly, so an arc would collapse to a tiny mark.
     const entry = { armIndex: i, dashes: [], legs: [] };
-    entry.dashes = pathDashes(arcPath(coreR + 0.12, angleFrom, angleTo), { dashLen: 0.9, gapLen: 0.7 });
+    const yieldIndex = Math.max(2, Math.floor((ap.entryOuter.length - 1) * 0.82));
+    entry.dashes = pathDashes([
+      ap.entryOuter[yieldIndex], ap.entryInner[yieldIndex],
+    ], { dashLen: 0.9, gapLen: 0.7 });
 
     // give-way triangle beside the entry branch, apex pointing at the island
     const total = polylineLength(ap.entryPath);
@@ -898,28 +919,27 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
 
   // Angular gaps between consecutive branch mouths, shared by ring markings
   // and the sidewalk wrap.
-  const GAP_MARGIN = 0.12;
+  const GAP_MARGIN = 0.05;
   const gapSpans = [];
   for (let i = 0; i < n; i += 1) {
     const j = (i + 1) % n;
-    let from = approaches[i].footOut;
-    let to = approaches[j].footIn;
+    let from = approaches[i].exitOuterFoot;
+    let to = approaches[j].entryOuterFoot;
     while (to <= from) to += Math.PI * 2;
     gapSpans.push({ from: from + GAP_MARGIN, to: to - GAP_MARGIN });
   }
 
-  // circulating carriageway lane dividers: dashed arcs splitting the ring into
-  // its lanes, laid only across the open gaps between islands.
+  // Circulating lane dividers stay continuous around the ring. The branch
+  // ribbons merge underneath them; keeping the circles visible makes every
+  // radial target segment read as a real graft instead of one undifferentiated
+  // asphalt disk.
   const circLanes = roundabout.circLanes
     || Math.max(1, Math.floor((coreR - roundabout.islandR - 0.4) / state.laneWidth));
   const ringWidth = coreR - roundabout.islandR;
   for (let k = 1; k < circLanes; k += 1) {
     const rDivider = roundabout.islandR + ringWidth * k / circLanes;
-    gapSpans.forEach(({ from, to }) => {
-      if (to - from < 0.35) return;
-      pathDashes(arcPath(rDivider, from, to), { dashLen: 1.0, gapLen: 1.0 })
-        .forEach((seg) => scene.laneDashes.push(seg));
-    });
+    pathDashes(arcPath(rDivider, 0, Math.PI * 2), { dashLen: 1.0, gapLen: 1.0 })
+      .forEach((seg) => scene.laneDashes.push(seg));
   }
 
   // pedestrian crossings across each stem behind the fork
@@ -927,11 +947,11 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
     geoms.forEach((g, i) => {
       const arm = g.arm;
       if (arm.laneIn <= 0 && arm.laneOut <= 0) return;
-      const startU = approaches[i].forkU - 6.2;
+      const startU = approaches[i].forkU + 1.2;
       const depth = Math.min(3.2, cfg.armLength - startU - 2);
       if (depth < 1.4 || startU <= coreR) return;
-      const sMin = Math.min(g.inOuterS, g.outOuterS);
-      const sMax = Math.max(g.inOuterS, g.outOuterS);
+      const sMin = -(g.medW / 2 + arm.laneOut * g.laneW);
+      const sMax = g.medW / 2 + arm.laneIn * g.laneW;
       const bars = [];
       const stripeW = 0.5, gap = 0.45;
       const islandHalf = 1.0 + 0.35;
@@ -946,22 +966,15 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
     });
   }
 
-  // sidewalk band hugs the outside of the ring between branch mouths; stems
-  // get their own edge curbs outward of the fork.
-  for (let i = 0; i < n; i += 1) {
-    const j = (i + 1) % n;
-    const { from, to } = gapSpans[i];
-    if (to - from < 0.3) continue;
-    const outerR = coreR + 0.32 + state.sidewalkWidth / 2 + 0.55;
-    const path = arcPath(outerR, from, to);
-    if (state.showSidewalk) scene.sidewalks.push({ path, width: state.sidewalkWidth, offset: 0 });
-    for (let k = 0; k < path.length - 1; k += 1) scene.curbs.push([path[k], path[k + 1]]);
-  }
+  // Do not wrap isolated sidewalk arcs around the outside of the roundabout.
+  // They form four detached concentric bands between approaches and read as an
+  // unintended extra lane. Approach curbs remain on the straight stems.
   geoms.forEach((g, i) => {
     const arm = g.arm;
     const ap = approaches[i];
     if (arm.laneIn <= 0 && arm.laneOut <= 0) return;
-    [[g.inOuterS, arm.laneIn > 0], [g.outOuterS, arm.laneOut > 0]].forEach(([s, has]) => {
+    [[g.medW / 2 + arm.laneIn * g.laneW, arm.laneIn > 0],
+      [-(g.medW / 2 + arm.laneOut * g.laneW), arm.laneOut > 0]].forEach(([s, has]) => {
       if (!has) return;
       scene.curbs.push([ap.frame.wp(ap.forkU + 0.2, s), g.wp(cfg.armLength, s)]);
     });
