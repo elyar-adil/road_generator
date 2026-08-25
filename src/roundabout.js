@@ -270,43 +270,27 @@ function pathSuffixOutsideRadius(path, radius) {
   return path.slice();
 }
 
-// Compact splitter island inside the Y. The previous implementation followed
-// both inner edges all the way into the annulus, producing the huge pointed
-// triangles visible in the editor. Stop both sides outside the circle and join
-// them with a short circular nose instead.
+// Splitter island filling the wedge between the Y branches and the ring.
+// Flanks follow the branch inner edges from the fork cap down to where they
+// cross the outer circle, then a ring arc closes the bottom — zero self-
+// intersections guaranteed because no flank edge ever goes inside coreR.
 export function forkIslandPolygon({ entryInner, exitInner, coreR, theta = 0, forkU = null, medW = 0 }) {
   if (!entryInner?.length || !exitInner?.length) return [];
-  const axis = { x: Math.cos(theta), y: Math.sin(theta) };
-  const lateral = { x: -axis.y, y: axis.x };
-  const capU = forkU ?? Math.max(
-    entryInner[0].x * axis.x + entryInner[0].y * axis.y,
-    exitInner.at(-1).x * axis.x + exitInner.at(-1).y * axis.y,
-  );
-  const capHalf = Math.max(0.22, medW / 2);
-  const availableDepth = Math.max(1, capU - coreR);
-  const noseR = coreR + Math.min(3.2, Math.max(1.8, availableDepth * 0.24));
-  const noseHalfAngle = Math.min(0.11, Math.max(0.045, capHalf / noseR + 0.045));
-  const sideSegments = 12;
-  const sideCurve = (from, to, sign) => Array.from({ length: sideSegments + 1 }, (_, index) => {
-    const progress = index / sideSegments;
-    const inverse = 1 - progress;
-    const control = add(scl(axis, coreR + availableDepth * 0.62), scl(lateral, sign * capHalf * 0.55));
-    return add(add(scl(from, inverse * inverse), scl(control, 2 * inverse * progress)), scl(to, progress * progress));
-  });
-  const capLower = add(scl(axis, capU), scl(lateral, -capHalf));
-  const capUpper = add(scl(axis, capU), scl(lateral, capHalf));
-  const noseLower = { x: noseR * Math.cos(theta - noseHalfAngle), y: noseR * Math.sin(theta - noseHalfAngle) };
-  const noseUpper = { x: noseR * Math.cos(theta + noseHalfAngle), y: noseR * Math.sin(theta + noseHalfAngle) };
-  const lowerSide = sideCurve(capLower, noseLower, -1);
-  const upperSide = sideCurve(noseUpper, capUpper, 1);
-  const noseSegments = 6;
-  const noseArc = Array.from({ length: noseSegments + 1 }, (_, index) => {
-    const angle = theta - noseHalfAngle + 2 * noseHalfAngle * index / noseSegments;
-    return { x: noseR * Math.cos(angle), y: noseR * Math.sin(angle) };
+  const entryFlank = pathPrefixOutsideRadius(entryInner, coreR);
+  const exitFlank = pathSuffixOutsideRadius(exitInner, coreR);
+  const entryCrossAngle = Math.atan2(entryFlank.at(-1).y, entryFlank.at(-1).x);
+  const exitCrossAngle = Math.atan2(exitFlank[0].y, exitFlank[0].x);
+  let sweep = exitCrossAngle - entryCrossAngle;
+  while (sweep > Math.PI) sweep -= TAU;
+  while (sweep <= -Math.PI) sweep += TAU;
+  const steps = Math.max(2, Math.ceil(Math.abs(sweep) / (2 * Math.PI / 180)));
+  const ringArc = Array.from({ length: steps + 1 }, (_, index) => {
+    const angle = entryCrossAngle + sweep * index / steps;
+    return { x: coreR * Math.cos(angle), y: coreR * Math.sin(angle) };
   });
   return [
-    ...lowerSide,
-    ...noseArc.slice(1, -1),
-    ...upperSide,
+    ...entryFlank,
+    ...ringArc.slice(1, -1),
+    ...exitFlank,
   ];
 }

@@ -96,15 +96,16 @@ describe('approach Y-geometry', () => {
     expect(ap.forkU).toBeGreaterThanOrEqual(coreR + 9);
   });
 
-  it('builds a closed island wedge between the Y and the seam arc', () => {
+  it('builds a closed island wedge between the Y and the ring', () => {
     const poly = forkIslandPolygon({
       entryInner: ap.entryInner,
       exitInner: ap.exitInner,
       coreR, theta: ap.theta, forkU: ap.forkU, medW: 0,
     });
-    // A point between the rounded nose and fork cap sits inside the island.
+    // A point between the fork cap and the ring sits inside the island.
     expect(pointInRing({ x: (coreR + ap.forkU) / 2, y: 0 }, poly)).toBe(true);
-    expect(Math.min(...poly.map((point) => len(point)))).toBeGreaterThan(coreR + 1.2);
+    // The island extends to the outer circle.
+    expect(Math.min(...poly.map((point) => len(point)))).toBeLessThanOrEqual(coreR + 1e-6);
     expect(properIntersections(poly)).toBe(0);
   });
 

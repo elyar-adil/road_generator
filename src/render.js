@@ -10,7 +10,7 @@
 
 import * as THREE from 'three';
 import {
-  add, scl, sub, len, buildDashedSegments,
+  add, scl, sub, len, buildDashedSegments, pointInRing,
 } from './geometry.js';
 
 export const ROAD_THEME = {
@@ -304,6 +304,40 @@ function addGuardrail(batch, group, rail, theme) {
   });
 }
 
+function seededRandom(seed) {
+  let s = seed;
+  return () => { s = (s * 16807 + 0) % 2147483647; return s / 2147483647; };
+}
+
+function addPlantedVegetation(group, pts, seed = 42) {
+  if (!pts || pts.length < 3) return;
+  const rand = seededRandom(seed);
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const p of pts) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minZ) minZ = p.y;
+    if (p.y > maxZ) maxZ = p.y;
+  }
+  const w = maxX - minX, h = maxZ - minZ;
+  if (w < 0.3 || h < 0.3) return;
+  const area = w * h;
+  const count = Math.max(4, Math.min(120, Math.round(area * 1.8)));
+  const greens = [0x2f6b3a, 0x3a7d44, 0x4a8a52, 0x357a3f, 0x2b6032];
+  for (let i = 0; i < count; i += 1) {
+    const x = minX + rand() * w;
+    const z = minZ + rand() * h;
+    if (!pointInRing({ x, y: z }, pts)) continue;
+    const s = 0.15 + rand() * 0.25;
+    const color = greens[Math.floor(rand() * greens.length)];
+    const bush = new THREE.Mesh(new THREE.SphereGeometry(s, 6, 5), matStd(color, 0.95));
+    bush.position.set(x, 0.145 + s * 0.5, z);
+    bush.scale.y = 0.5 + rand() * 0.3;
+    bush.castShadow = true;
+    group.add(bush);
+  }
+}
+
 function addArrows(batch, arrows, theme) {
   arrows.forEach(({ pts }) => {
     const polys = Array.isArray(pts[0]) ? pts : [pts];
@@ -482,6 +516,19 @@ export function renderRoadScene(derived, group, theme = ROAD_THEME) {
 
   // flush all merged marking/surface meshes into the group
   batch.flush(group);
+
+  // planted vegetation: random bushes on all green (planted) areas
+  let vegSeed = 1;
+  derived.medianIslands.forEach((pts) => {
+    addPlantedVegetation(group, pts, vegSeed);
+    vegSeed += 137;
+  });
+  derived.guideAreas.forEach(({ pts, planted }) => {
+    if (planted) {
+      addPlantedVegetation(group, pts, vegSeed);
+      vegSeed += 137;
+    }
+  });
 
   // traffic lights
   derived.trafficLights.forEach(({ pos, heading }) => {
