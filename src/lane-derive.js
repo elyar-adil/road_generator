@@ -27,6 +27,7 @@ import {
   roundaboutArmSlots,
   forkIslandPolygon,
 } from './roundabout.js';
+import { pathDistanceAtRadius, mergeYieldMarks } from './graft.js';
 
 // ---------------------------------------------------------------------------
 // Arrow outlines (design spec, units cm; local frame [lateral, forward]).
@@ -881,34 +882,34 @@ export function deriveRoundaboutScene(model, state, random = Math.random) {
     .forEach((quad) => scene.roadSurfaces.push(quad));
   scene.medianIslands.push(circlePolygon({ x: 0, y: 0 }, roundabout.islandR, 64));
 
-  // ---- entry semantics: yield line + give-way triangle + flow arrow ----
-  geoms.forEach((g, i) => {
-    const arm = g.arm;
-    const ap = approaches[i];
-    if (arm.laneIn <= 0) return;
+    // ---- entry semantics: yield line + give-way triangle + flow arrow ----
+    geoms.forEach((g, i) => {
+      const arm = g.arm;
+      const ap = approaches[i];
+      if (arm.laneIn <= 0) return;
 
-    // Dashed give-way line crosses the full, constant-width entry bundle at
-    // its allocated slot. With a tangent mouth the two edges differ radially,
-    // not angularly, so an arc would collapse to a tiny mark.
-    const entry = { armIndex: i, dashes: [], legs: [] };
-    const yieldIndex = Math.max(2, Math.floor((ap.entryOuter.length - 1) * 0.82));
-    entry.dashes = pathDashes([
-      ap.entryOuter[yieldIndex], ap.entryInner[yieldIndex],
-    ], { dashLen: 0.9, gapLen: 0.7 });
-
-    // give-way triangle beside the entry branch, apex pointing at the island
-    const total = polylineLength(ap.entryPath);
-    const pose = pointAndTangentAtDistance(ap.entryPath, Math.max(1, total - ap.halfIn - 1.4));
-    if (pose) {
-      const t = pose.tangent;
-      const leftN = { x: -t.y, y: t.x };
-      const centre = add(pose.point, scl(leftN, ap.halfIn + 1.05));
-      const apex = add(centre, scl(leftN, 0.85));
-      const b1 = add(centre, scl(t, 0.42));
-      const b2 = add(centre, scl(t, -0.42));
-      entry.legs.push([b1, b2], [b1, apex], [b2, apex]);
-    }
-    scene.entryMarks.push(entry);
+      // Graft-kernel yield marks: the dashed give-way line anchors to where
+      // the entry centreline crosses just outside the outer circle — a path
+      // fraction would drift into the annulus whenever the seam blend is deep
+      // (wide entries on small rings). Wide bundles on large rings already
+      // curve with the circle there, so both line ends are clamped radially
+      // to keep the whole mark clear of the circulating carriageway.
+      const clearR = coreR + 0.05;
+      const clampOutside = (p) => {
+        const r = Math.hypot(p.x, p.y);
+        if (r >= clearR) return p;
+        const k = clearR / r;
+        return { x: p.x * k, y: p.y * k };
+      };
+      const yieldDist = pathDistanceAtRadius(ap.entryPath, coreR + 0.9)
+        ?? polylineLength(ap.entryPath) * 0.82;
+      const { dashes, legs } = mergeYieldMarks({
+        centerline: ap.entryPath,
+        seamDistance: yieldDist,
+        halfWidth: ap.halfIn,
+        clampPoint: clampOutside,
+      });
+      scene.entryMarks.push({ armIndex: i, dashes, legs });
 
     // circulating flow arrow downstream of the entry mouth
     const midC = coreR - roundabout.circWidth * 0.32;

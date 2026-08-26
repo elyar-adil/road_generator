@@ -97,15 +97,36 @@ describe('approach Y-geometry', () => {
   });
 
   it('builds a closed island wedge between the Y and the ring', () => {
+    // A stem median chains into the island, so test with a real median width.
+    const medianAp = roundaboutApproach({ angleDeg: 0, coreR, laneWidth: 3.25, laneIn: 2, laneOut: 2, medW: 1.2 });
     const poly = forkIslandPolygon({
-      entryInner: ap.entryInner,
-      exitInner: ap.exitInner,
-      coreR, theta: ap.theta, forkU: ap.forkU, medW: 0,
+      entryInner: medianAp.entryInner,
+      exitInner: medianAp.exitInner,
+      coreR, theta: medianAp.theta, forkU: medianAp.forkU, medW: 1.2,
     });
-    // A point between the fork cap and the ring sits inside the island.
-    expect(pointInRing({ x: (coreR + ap.forkU) / 2, y: 0 }, poly)).toBe(true);
+    // The island body sits in the outer half of the wedge (the fork end is
+    // closed with a rounded cap, so it never tapers to a needle).
+    expect(pointInRing({ x: coreR + (medianAp.forkU - coreR) * 0.4, y: 0 }, poly)).toBe(true);
     // The island extends to the outer circle.
     expect(Math.min(...poly.map((point) => len(point)))).toBeLessThanOrEqual(coreR + 1e-6);
+    expect(properIntersections(poly)).toBe(0);
+  });
+
+  it('never tapers the island to a needle at the fork', () => {
+    // Wide entry on a small ring: the raw wedge is ~0m wide at the fork, so
+    // either no island is emitted or every point stays clear of the apex.
+    const wide = roundaboutApproach({
+      angleDeg: 0, coreR: 16.5, laneWidth: 3.25, laneIn: 3, laneOut: 2, medW: 0,
+    });
+    const poly = forkIslandPolygon({
+      entryInner: wide.entryInner,
+      exitInner: wide.exitInner,
+      coreR: 16.5, theta: wide.theta, forkU: wide.forkU, medW: 0,
+    });
+    const forkApex = wide.entryInner[0];
+    for (const point of poly) {
+      expect(Math.hypot(point.x - forkApex.x, point.y - forkApex.y)).toBeGreaterThan(0.6);
+    }
     expect(properIntersections(poly)).toBe(0);
   });
 

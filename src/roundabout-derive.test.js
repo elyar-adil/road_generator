@@ -5,7 +5,11 @@ import { deriveRoadScene } from './lane-derive.js';
 
 function roundaboutScene(overrides = {}) {
   const state = sanitizeProject({
-    ...createDefaultProject(), junctionType: 'roundabout', scenerySeed: 1, ...overrides,
+    ...createDefaultProject(), junctionType: 'roundabout', scenerySeed: 1,
+    // createDefaultProject samples intersectionSize from its own random seed,
+    // so pin it — otherwise inscribedR (and every radius assertion below)
+    // changes between runs.
+    intersectionSize: 38, ...overrides,
   });
   const model = buildRoadModel(state);
   const scene = deriveRoadScene(model, state, createSeededRandom(state.scenerySeed));

@@ -8,8 +8,9 @@
 
 import {
   add, scl, sub, len, clamp,
-  appendCubic2, offsetLanePaths, offsetPolyline, edgeLine, fillet,
+  offsetLanePaths, offsetPolyline, edgeLine, fillet,
 } from './geometry.js';
+import { tangentBlend } from './graft.js';
 
 export function computeRightTurnLayout({ fromRadius, targetRadius, armLength, laneWidth, stopU: externalStopU }) {
   const safeLength = Math.max(12, Number(armLength) || 12);
@@ -47,13 +48,9 @@ function buildDirectRightTurnPath(fromG, toG, laneIndex) {
   const chord = len(sub(end, start));
   if (chord < 1.5) return null;
   const handle = Math.min(12, Math.max(3.2, chord * 0.34));
-  const path = [start];
-  appendCubic2(
-    path,
-    start, add(start, scl(fromG.fwd, -handle)),
-    add(end, scl(toG.fwd, -handle)), end, 14,
-  );
-  return path;
+  return tangentBlend(start, fromG.fwd, end, toG.fwd, {
+    startHandle: handle, endHandle: handle, segments: 14,
+  });
 }
 
 // Data for a dedicated right-turn connector from arm `fromG` to arm `toG`.
@@ -99,14 +96,13 @@ export function buildRightTurnPathData(fromG, toG, type, laneCount, { armLength,
   if (turnChord < 2) return null;
   // One continuously curved split connector: start tangent runs parallel to the
   // mainline (toward the core), end tangent runs parallel to the target arm
-  // (departing). A single cubic Bézier holds both end tangents while turning
-  // smoothly midway, replacing the old "straight run + arc" hard join.
+  // (departing). A single tangent blend (graft kernel) holds both end tangents
+  // while turning smoothly midway.
   const handle = Math.min(24, Math.max(3.5, turnChord * 0.38));
   const startDir = { x: -fromG.fwd.x, y: -fromG.fwd.y };
-  const c1 = add(sourceAnchor, scl(startDir, handle));
-  const c2 = add(targetAnchor, scl(toG.fwd, -handle));
-  const path = [sourceAnchor];
-  appendCubic2(path, sourceAnchor, c1, c2, targetAnchor, 48);
+  const path = tangentBlend(sourceAnchor, startDir, targetAnchor, toG.fwd, {
+    startHandle: handle, endHandle: handle, segments: 48,
+  });
   // The branch keeps a constant lane width along its whole centreline. The
   // channelized gore island (guide triangle) separates it from the through road
   // at the split, so the pavement never tapers to a needle nose.
