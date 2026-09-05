@@ -23,6 +23,17 @@
   box-sizing: border-box;
 }
 
+[hidden] { display: none !important; }
+.pipeline-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin: 12px 0; }
+.pipeline-tabs button { font-size: 11px; padding: 8px 4px; }
+.pipeline-tabs button.active, #editMapBtn.active { color: var(--accent); border-color: var(--accent); background: var(--accent-dark); }
+.city-actions { display: grid; gap: 8px; }
+.editor-selection { color: var(--accent-2); overflow-wrap: anywhere; }
+#mapEditor { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--line); }
+#edgeProperties input { width: 64px; }
+#cityDiagnostics { line-height: 1.7; }
+#statArea { font-size: 17px; white-space: nowrap; }
+
 html,
 body,
 #app {

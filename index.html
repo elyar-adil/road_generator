@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#0a0f18">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <meta name="description" content="在浏览器中设计、预览并导出程序化多岔路口。">
   <title>路口工坊 · Intersection Studio</title>
   <link rel="stylesheet" href="/src/styles.css">
@@ -70,9 +71,10 @@
           <button data-preset="offset4"><span>⌁</span>错位十字</button>
           <button data-preset="five"><span>✣</span>五岔路口</button>
         </div>
+        <button id="cityPresetBtn" class="wide primary" style="margin-top:10px">城市生成 · SD → HD → 场景</button>
       </section>
 
-      <section class="section">
+      <section class="section" id="localArmsSection">
         <div class="section-head">
           <div class="section-title">道路分支 <span id="armCountBadge" class="badge">4</span></div>
           <button id="addArm" class="text-button">＋ 添加</button>
@@ -88,9 +90,47 @@
             <select id="junctionType" aria-label="路口类型">
               <option value="cross">信号交叉口</option>
               <option value="roundabout">环岛</option>
+              <option value="city">城市路网（SD → HD）</option>
             </select>
           </div>
         </div>
+      </section>
+
+      <section class="section" id="cityControls" hidden>
+        <div class="section-title">城市生成管线</div>
+        <div class="pipeline-tabs" aria-label="生成层级">
+          <button data-city-view="sd">01 · SD 路网</button>
+          <button data-city-view="hd">02 · HD 车道</button>
+          <button data-city-view="scene">03 · 三维场景</button>
+          <button data-city-view="semantic">04 · 语义类别</button>
+        </div>
+        <p class="sub" id="pipelineDescription">编辑节点和道路意图，车道连接与场景从 SD 自动派生。</p>
+        <div class="control-stack">
+          <label class="slider-row" for="citySize"><span>城市边长</span><input type="range" id="citySize" min="1400" max="2400" step="100"><output class="valtag" id="citySizeV"></output><em>m</em></label>
+          <label class="slider-row" for="cityBlockSize"><span>街区尺度</span><input type="range" id="cityBlockSize" min="80" max="180" step="10"><output class="valtag" id="cityBlockSizeV"></output><em>m</em></label>
+          <label class="slider-row" for="cityOrganic"><span>道路曲折度</span><input type="range" id="cityOrganic" min="0.2" max="1" step="0.05"><output class="valtag" id="cityOrganicV"></output><em></em></label>
+          <label class="slider-row" for="cityDensity"><span>建筑覆盖率</span><input type="range" id="cityDensity" min="0.1" max="1" step="0.05"><output class="valtag" id="cityDensityV"></output><em></em></label>
+          <label class="slider-row" for="bridgeHeight"><span>默认上跨高差</span><input type="range" id="bridgeHeight" min="6.5" max="10" step="0.1"><output class="valtag" id="bridgeHeightV"></output><em>m</em></label>
+          <label class="slider-row" for="highwayLanes" hidden><span>快速路单向</span><input type="range" id="highwayLanes" min="1" max="4" step="1"><output class="valtag" id="highwayLanesV"></output><em>道</em></label>
+        </div>
+        <p class="sub">边长、街区尺度与曲折度用于生成新 SD。河岸、旧城核心与人口密度共同引导道路生长。现有编辑保留至点击生成按钮。</p>
+        <div class="city-actions">
+          <button id="generateCityBtn">生成新 SD 路网</button>
+          <button id="editMapBtn">编辑 SD 路网</button>
+          <button id="exportSceneBtn">导出场景数据</button>
+        </div>
+        <div id="mapEditor" hidden>
+          <p class="sub">拖动节点修改路网。双击空白添加节点；按住 Shift 点击两个节点连接道路。点击道路可修改属性。</p>
+          <p id="mapSelection" class="editor-selection">尚未选择节点或道路</p>
+          <div id="edgeProperties" hidden>
+            <label class="field-row">道路等级<select id="edgeClass"><option value="local">支路</option><option value="collector">次干路</option><option value="arterial">主干路</option><option value="highway">快速路</option></select></label>
+            <label class="field-row">正向车道<input id="edgeForward" type="number" min="0" max="4"></label>
+            <label class="field-row">反向车道<input id="edgeBackward" type="number" min="0" max="4"></label>
+            <label class="field-row">交叉关系<select id="edgeLayer"><option value="0">地面相交</option><option value="1">上跨（桥梁）</option><option value="-1">下穿（隧道）</option></select></label>
+          </div>
+          <button id="deleteMapSelection" class="wide">删除选中对象</button>
+        </div>
+        <p class="sub" id="cityDiagnostics" role="status"></p>
       </section>
 
       <section class="section">
@@ -101,12 +141,12 @@
             <input type="range" id="laneWidth" min="2.6" max="4.2" step="0.05" value="3.25">
             <output class="valtag" id="laneWidthV"></output><em>m</em>
           </label>
-          <label class="slider-row" for="intersectionSize">
+          <label class="slider-row local-only" for="intersectionSize">
             <span>路口核心尺寸</span>
             <input type="range" id="intersectionSize" min="28" max="60" step="1" value="34">
             <output class="valtag" id="intersectionSizeV"></output><em>m</em>
           </label>
-          <label class="slider-row" for="armLength">
+          <label class="slider-row local-only" for="armLength">
             <span>道路长度</span>
             <input type="range" id="armLength" min="25" max="80" step="1" value="46">
             <output class="valtag" id="armLengthV"></output><em>m</em>
@@ -116,7 +156,7 @@
             <input type="range" id="sidewalkWidth" min="0.8" max="5" step="0.1" value="2.4">
             <output class="valtag" id="sidewalkWidthV"></output><em>m</em>
           </label>
-          <label class="slider-row" for="filletSeg">
+          <label class="slider-row local-only" for="filletSeg">
             <span>转角精度</span>
             <input type="range" id="filletSeg" min="1" max="12" step="1" value="7">
             <output class="valtag" id="filletSegV"></output><em>级</em>
@@ -173,7 +213,7 @@
     <aside class="metrics" aria-label="项目统计">
       <span class="eyebrow">LIVE METRICS</span>
       <div class="metric-grid">
-        <div><strong id="statArms">4</strong><span>道路分支</span></div>
+        <div><strong id="statArms">4</strong><span id="statArmsLabel">道路分支</span></div>
         <div><strong id="statLanes">17</strong><span>总车道</span></div>
         <div><strong id="statArea">—</strong><span>道路面积</span></div>
       </div>

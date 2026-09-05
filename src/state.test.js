@@ -130,7 +130,7 @@ describe('project state', () => {
     const restored = parseProjectDocument(JSON.stringify(document));
 
     expect(restored).toEqual(source);
-    expect(document.version).toBe(3);
+    expect(document.version).toBe(4);
   });
 
   it('calculates stable metrics and deterministic random values', () => {

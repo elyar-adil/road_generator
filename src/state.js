@@ -1,10 +1,11 @@
 import { classifyArmMovement } from './road-movements.js';
+import { sanitizeSDMap, validateSDMap } from './sd-map.js';
 
 export const PROJECT_FORMAT = 'intersection-studio';
-export const PROJECT_VERSION = 3;
+export const PROJECT_VERSION = 4;
 
 export const CENTER_MODES = new Set(['planted', 'doubleYellowRail', 'doubleYellow']);
-export const JUNCTION_TYPES = new Set(['cross', 'roundabout']);
+export const JUNCTION_TYPES = new Set(['cross', 'roundabout', 'city']);
 export const WAITING_AREA_TYPES = new Set(['none', 'left', 'straight']);
 export const RIGHT_ISLAND_TYPES = new Set(['planted', 'hatched']);
 export const RIGHT_TURN_TYPES = new Set(['none', 'direct', 'split', 'slip']);
@@ -97,6 +98,14 @@ export function createDefaultProject() {
   return {
     projectName: '城市十字路口',
     junctionType: 'cross',
+    cityView: 'sd',
+    citySize: 1800,
+    cityBlockSize: 120,
+    cityOrganic: 0.8,
+    cityDensity: 0.72,
+    bridgeHeight: 7.5,
+    highwayLanes: 2,
+    sdMap: null,
     arms: clone(DEFAULT_ARMS).map((arm) => ({
       ...arm,
       rightTurnType: rightTurnTypes[arm.angle / 90 % rightTurnTypes.length],
@@ -147,6 +156,14 @@ export function sanitizeProject(value) {
   return {
     projectName: String(source.projectName ?? defaults.projectName).trim().slice(0, 40) || '未命名路口',
     junctionType: JUNCTION_TYPES.has(source.junctionType) ? source.junctionType : defaults.junctionType,
+    cityView: ['sd', 'hd', 'scene', 'semantic'].includes(source.cityView) ? source.cityView : 'sd',
+    citySize: Math.round(clamp(finite(source.citySize, defaults.citySize), 1400, 2400)),
+    cityBlockSize: Math.round(clamp(finite(source.cityBlockSize, defaults.cityBlockSize), 80, 180)),
+    cityOrganic: Math.round(clamp(finite(source.cityOrganic, defaults.cityOrganic), 0.2, 1) * 100) / 100,
+    cityDensity: Math.round(clamp(finite(source.cityDensity, defaults.cityDensity), 0.1, 1) * 100) / 100,
+    bridgeHeight: Math.round(clamp(finite(source.bridgeHeight, defaults.bridgeHeight), 6.5, 10) * 10) / 10,
+    highwayLanes: Math.round(clamp(finite(source.highwayLanes, defaults.highwayLanes), 1, 4)),
+    sdMap: sanitizeSDMap(source.sdMap),
     arms: arms.length >= 2 ? arms : defaults.arms,
     laneWidth: Math.round(clamp(finite(source.laneWidth, defaults.laneWidth), 2.6, 4.2) * 20) / 20,
     intersectionSize,
@@ -172,6 +189,11 @@ export function validateProject(value) {
   const project = sanitizeProject(value);
   const errors = [];
   const warnings = [];
+
+  if (project.junctionType === 'city') {
+    const result = project.sdMap ? validateSDMap(project.sdMap) : { valid: true, errors: [], warnings: [] };
+    return { ...result, project };
+  }
 
   if (project.arms.length < 2 || project.arms.length > 8) {
     errors.push('道路分支数量必须在 2–8 之间');
@@ -279,6 +301,7 @@ export function parseProjectDocument(text) {
   if (Number(value?.version ?? 1) > PROJECT_VERSION) {
     throw new Error('项目文件版本高于当前应用版本');
   }
+  if (Number(unwrapProject(value).sdMap?.version ?? 1) > 1) throw new Error('SD 路网版本高于当前应用版本');
 
   const result = validateProject(value);
   if (!result.valid) throw new Error(result.errors[0]);

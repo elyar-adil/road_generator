@@ -31,6 +31,9 @@ import { classifyArmMovement } from './road-movements.js';
 import { computeLaneTopology } from './lane-topology.js';
 import { buildRoadModel } from './road-model.js';
 import { deriveRoadScene } from './lane-derive.js';
+import { buildCity, createSceneDocument } from './city.js';
+import { renderCity } from './city-render.js';
+import { generateSDMap, splitAtGradeCrossings, validateSDMap } from './sd-map.js';
 import { renderRoadScene, ROAD_THEME, matStd, boxAlong, flatPoly, pathRibbon, glowMat } from './render.js';
 import {
   buildLaneTaper, buildSegmentSurface, buildSidewalkBounds,
@@ -46,8 +49,11 @@ import {
    ====================================================================== */
 
 // ---------------------------------------------------------------- STATE
-let state = sanitizeProject(loadLocalProject() ?? createDefaultProject());
+let state = sanitizeProject(loadLocalProject() ?? { ...createDefaultProject(), junctionType: 'city', projectName: '程序化城市' });
+if(state.junctionType==='city' && !state.sdMap) state.sdMap=generateSDMap(state);
 const history = new ProjectHistory(state);
+let currentCity=null, editingMap=false, mapSelection=null, mapDrag=null, connectFrom=null;
+let previousSceneType=null;
 
 // ---------------------------------------------------------------- THREE SETUP
 const container = document.getElementById('canvas-container');
@@ -55,10 +61,10 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x8fb8d8);
 scene.fog = new THREE.Fog(0x8fb8d8, 90, 240);
 
-const persp = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 1000);
+const persp = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 20000);
 let orthoHalfHeight = 60;
-const ortho = new THREE.OrthographicCamera(-60, 60, 60, -60, 0.1, 500);
-ortho.position.set(0, 160, 0.001);
+const ortho = new THREE.OrthographicCamera(-60, 60, 60, -60, 0.1, 10000);
+ortho.position.set(0, 6000, 0.001);
 ortho.up.set(0,0,-1);
 ortho.lookAt(0,0,0);
 let activeCam = persp;
@@ -73,7 +79,7 @@ function updateOrthoProjection(){
 }
 updateOrthoProjection();
 
-const renderer = new THREE.WebGLRenderer({antialias:true, preserveDrawingBuffer:true});
+const renderer = new THREE.WebGLRenderer({antialias:true, preserveDrawingBuffer:true, logarithmicDepthBuffer:true});
 renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
@@ -103,15 +109,15 @@ fillLight.position.set(-50,40,-60);
 scene.add(fillLight);
 
 // ground
-{
-  const g = new THREE.Mesh(new THREE.CircleGeometry(220,64), new THREE.MeshStandardMaterial({color:ROAD_THEME.ground, roughness:1}));
-  g.rotation.x = -Math.PI/2;
-  g.receiveShadow = true;
-  scene.add(g);
-}
+const ground = new THREE.Mesh(new THREE.CircleGeometry(220,96), new THREE.MeshStandardMaterial({color:ROAD_THEME.ground, roughness:1}));
+ground.rotation.x = -Math.PI/2;
+ground.receiveShadow = true;
+scene.add(ground);
 
 const worldGroup = new THREE.Group();
 scene.add(worldGroup);
+const selectionGroup = new THREE.Group();
+scene.add(selectionGroup);
 
 // Lane-topology overlay: toggleable colored centreline graph visible in both
 // the 3D perspective and top-down orthographic views.
@@ -146,6 +152,7 @@ updatePerspCamera();
 
 let dragMode = null, lastX=0,lastY=0, activePointerId=null;
 renderer.domElement.addEventListener('pointerdown', e=>{
+  if(handleMapPointerDown(e)) return;
   if(activePointerId!==null) return;
   activePointerId=e.pointerId;
   dragMode = e.button===2 || topDownMode ? 'pan' : 'rotate';
@@ -153,12 +160,14 @@ renderer.domElement.addEventListener('pointerdown', e=>{
   renderer.domElement.setPointerCapture(e.pointerId);
 });
 function endDrag(e){
+  if(finishMapDrag(e)) return;
   if(e.pointerId!==activePointerId) return;
   dragMode=null; activePointerId=null;
 }
 renderer.domElement.addEventListener('pointerup', endDrag);
 renderer.domElement.addEventListener('pointercancel', endDrag);
 renderer.domElement.addEventListener('pointermove', e=>{
+  if(handleMapPointerMove(e)) return;
   if(!dragMode || e.pointerId!==activePointerId) return;
   const dx = e.clientX-lastX, dy = e.clientY-lastY;
   lastX=e.clientX; lastY=e.clientY;
@@ -166,7 +175,7 @@ renderer.domElement.addEventListener('pointermove', e=>{
     const scale = (ortho.right-ortho.left)/window.innerWidth;
     camState.target.x -= dx*scale;
     camState.target.z -= dy*scale;
-    ortho.position.set(camState.target.x,160,camState.target.z+0.001);
+    ortho.position.set(camState.target.x,6000,camState.target.z+0.001);
     ortho.lookAt(camState.target.x,0,camState.target.z);
     return;
   }
@@ -187,10 +196,10 @@ renderer.domElement.addEventListener('wheel', e=>{
   e.preventDefault();
   if(topDownMode){
     const factor = Math.pow(1.001, e.deltaY);
-    orthoHalfHeight = Math.min(180,Math.max(12,orthoHalfHeight*factor));
+    orthoHalfHeight = Math.min(state.junctionType==='city'?4000:180,Math.max(12,orthoHalfHeight*factor));
     updateOrthoProjection();
   } else {
-    camState.radius = Math.min(220, Math.max(14, camState.radius*Math.pow(1.0012,e.deltaY)));
+    camState.radius = Math.min(state.junctionType==='city'?9000:220, Math.max(14, camState.radius*Math.pow(1.0012,e.deltaY)));
     updatePerspCamera();
   }
 },{passive:false});
@@ -348,6 +357,29 @@ function sideLateral(inOuterS, laneW){
 function regenerate(){
   clearWorld();
   trafficLights.length = 0;
+  syncCityControls();
+  if(state.junctionType==='city'){
+    if(!state.sdMap) state.sdMap=generateSDMap(state);
+    currentCity=buildCity(state);
+    renderCity(currentCity,worldGroup,{...state,sdNodesVisible:editingMap});
+    for(const group of [topologyGroup,segmentGroup]){ disposeGroup(group); group.clear(); group.visible=false; }
+    const extent=currentCity.extent;
+    configureSceneExtent(extent,state.cityView==='sd'||state.cityView==='hd'||state.cityView==='semantic');
+    if(previousSceneType!=='city'){
+      fitSceneCamera();
+      if(state.cityView==='sd'||state.cityView==='hd') setCameraMode('top');
+    }
+    previousSceneType='city';
+    renderMapSelection();
+    updateProjectInsights();
+    renderer.shadowMap.needsUpdate=true;
+    return;
+  }
+  currentCity=null;
+  disposeGroup(selectionGroup); selectionGroup.clear();
+  configureSceneExtent(100,false);
+  if(previousSceneType==='city') fitSceneCamera();
+  previousSceneType=state.junctionType;
   const sceneRandom = createSeededRandom(state.scenerySeed);
 
   // Layer 1: road model (geometry + connectivity + right-turn facilities).
@@ -439,12 +471,19 @@ function updateHistoryButtons(){
 }
 
 function updateProjectInsights(){
-  const stats=getProjectStats(state);
-  const validation=validateProject(state);
+  const city=state.junctionType==='city'?currentCity:null;
+  const stats=city?{arms:city.sd.edges.length,lanes:city.lanes.length,roadArea:city.roadArea||0}:getProjectStats(state);
+  const validation=city?{...city.validation,warnings:city.warnings}:validateProject(state);
   document.getElementById('statArms').textContent=stats.arms;
   document.getElementById('statLanes').textContent=stats.lanes;
-  document.getElementById('statArea').textContent=stats.roadArea.toLocaleString('zh-CN')+'㎡';
+  document.getElementById('statArea').textContent=city?(stats.roadArea/1000000).toFixed(2)+' km²':stats.roadArea.toLocaleString('zh-CN')+'㎡';
   document.getElementById('armCountBadge').textContent=stats.arms;
+  document.getElementById('statArmsLabel').textContent=city?'SD 道路':'道路分支';
+  if(city){
+    document.getElementById('cityDiagnostics').textContent=`${city.sd.nodes.length} 个节点 · ${city.connectors.length} 条转向连接 · ${city.blocks.length} 个街区 · ${city.buildings.length} 栋建筑。`+
+      ` ${city.facilities.filter(f=>f.type==='bridge').length} 座桥梁 · ${city.facilities.filter(f=>f.type==='tunnel').length} 条隧道。`+
+      (city.warnings.length?' '+city.warnings.slice(0,3).join('；'):'');
+  }
 
   const status=document.getElementById('validationStatus');
   const message=validation.errors[0] || validation.warnings[0] || '拓扑检查通过';
@@ -484,6 +523,12 @@ const sliderConfigs=[
   ['armLength','armLength',0,true],
   ['sidewalkWidth','sidewalkWidth',2,true],
   ['filletSeg','filletSeg',0,true],
+  ['citySize','citySize',0,false],
+  ['cityBlockSize','cityBlockSize',0,false],
+  ['cityOrganic','cityOrganic',2,false],
+  ['cityDensity','cityDensity',2,true],
+  ['bridgeHeight','bridgeHeight',1,true],
+  ['highwayLanes','highwayLanes',0,false],
 ];
 
 function syncSlider(id,key,digits,shouldRegenerate){
@@ -525,6 +570,7 @@ const junctionTypeSelect=document.getElementById('junctionType');
 junctionTypeSelect.value=state.junctionType;
 junctionTypeSelect.addEventListener('change',()=>{
   state.junctionType=junctionTypeSelect.value;
+  editingMap=false; mapSelection=null; connectFrom=null;
   regenerate();
 });
 
@@ -815,6 +861,11 @@ document.getElementById('genBtn').addEventListener('click',()=>{
 });
 
 document.getElementById('randBtn').addEventListener('click',()=>{
+  if(state.junctionType==='city'){
+    state.scenerySeed=1+Math.floor(Math.random()*99999998);
+    state.sdMap=generateSDMap(state);
+    syncAllControls(); regenerate(); fitSceneCamera(); return;
+  }
   const count=3+Math.floor(Math.random()*4);
   const offset=Math.random()*360;
   const spacing=360/count;
@@ -844,6 +895,8 @@ const presets={
 
 document.querySelectorAll('[data-preset]').forEach(button=>{
   button.addEventListener('click',()=>{
+    state.junctionType='cross';
+    junctionTypeSelect.value='cross';
     state.arms=presets[button.dataset.preset].map(arm=>makeArm(arm.angle,arm.laneIn,arm.laneOut));
     state.intersectionSize=sampleIntersectionSize(Math.random);
     document.getElementById('intersectionSize').value=state.intersectionSize;
@@ -872,6 +925,7 @@ function syncAllControls(){
 
 function applyProject(next,{record=true,message=''}={}){
   state=sanitizeProject(next);
+  editingMap=false; mapSelection=null; connectFrom=null;
   syncAllControls();
   renderArmsList();
   regenerate();
@@ -920,7 +974,7 @@ function setCameraMode(mode){
   document.getElementById('cam3d').classList.toggle('active',!topDownMode);
   document.getElementById('camtop').classList.toggle('active',topDownMode);
   if(topDownMode){
-    ortho.position.set(camState.target.x,160,camState.target.z+0.001);
+    ortho.position.set(camState.target.x,6000,camState.target.z+0.001);
     ortho.lookAt(camState.target.x,0,camState.target.z);
   }
 }
@@ -929,14 +983,7 @@ document.getElementById('cam3d').addEventListener('click',()=>setCameraMode('3d'
 document.getElementById('camtop').addEventListener('click',()=>setCameraMode('top'));
 if(new URLSearchParams(window.location.search).get('view')==='top') setCameraMode('top');
 document.getElementById('resetCameraBtn').addEventListener('click',()=>{
-  camState.theta=Math.PI*0.28;
-  camState.phi=1.02;
-  camState.radius=78;
-  camState.target.set(0,0,2);
-  orthoHalfHeight=60;
-  updatePerspCamera();
-  updateOrthoProjection();
-  if(topDownMode) setCameraMode('top');
+  fitSceneCamera();
   showToast('视角已重置');
 });
 
@@ -1043,7 +1090,212 @@ window.addEventListener('error',event=>{
   showToast('运行时出现异常，请尝试重新生成场景');
 });
 
+// ---------------------------------------------------------------- CITY AUTHORING
+function configureSceneExtent(extent, schematic){
+  const city=state.junctionType==='city';
+  ground.scale.setScalar(city?extent*1.55/220:1);
+  ground.material.color.setHex(schematic?0x17282c:ROAD_THEME.ground);
+  scene.background.setHex(schematic?0x17282c:0x8fb8d8);
+  scene.fog=schematic?null:new THREE.Fog(0x8fb8d8,city?extent*3:90,city?extent*7:240);
+  const size=city?extent*1.1:90;
+  sun.position.set(size*0.7,size*1.4,size*0.5);
+  Object.assign(sun.shadow.camera,{left:-size,right:size,top:size,bottom:-size,far:size*5});
+  sun.shadow.camera.updateProjectionMatrix();
+  gridHelper.scale.setScalar(city?extent/100:1);
+  gridHelper.visible=state.showGrid;
+}
+
+function fitSceneCamera(){
+  const city=state.junctionType==='city',extent=currentCity?.extent||state.citySize/2;
+  camState.theta=Math.PI*0.28; camState.phi=1.02;
+  camState.radius=city?extent*3.0:78;
+  camState.target.set(city?-extent*0.16:0,0,city?0:2);
+  orthoHalfHeight=city?extent*1.12:60;
+  updatePerspCamera(); updateOrthoProjection();
+  if(topDownMode) setCameraMode('top');
+}
+
+function syncCityControls(){
+  const city=state.junctionType==='city';
+  document.querySelector('#panel h1').textContent=city?'城市生成':'路口参数';
+  document.querySelector('.presets').hidden=city;
+  document.getElementById('cityPresetBtn').hidden=city;
+  document.getElementById('cityControls').hidden=!city;
+  document.getElementById('localArmsSection').hidden=city;
+  document.querySelectorAll('.local-only').forEach(e=>{e.hidden=city;});
+  document.querySelectorAll('[data-city-view]').forEach(e=>e.classList.toggle('active',e.dataset.cityView===state.cityView));
+  document.getElementById('mapEditor').hidden=!city||!editingMap;
+  document.getElementById('editMapBtn').classList.toggle('active',editingMap);
+  document.getElementById('editMapBtn').textContent=editingMap?'结束编辑':'编辑 SD 路网';
+  for(const id of ['showWaitingAreas','showLights','showSegmentDemo','trafficSpeed','trafficPauseBtn']) document.getElementById(id).disabled=city;
+  document.getElementById('pipelineDescription').textContent={
+    sd:'SD 是编辑源：灰蓝色支路、青色次干路、金色主干路。沿河岸与城区方向场生长，同层相交连接，桥梁独立跨越。',
+    hd:'HD 从 SD 派生：显示有向车道与转向连接。蓝色直行、绿色左转、橙色右转。',
+    scene:'道路、路口、桥梁和建筑从拓扑生成。编辑 SD 后，所有下游层重新派生。',
+    semantic:'语义类别：紫色道路、蓝色建筑、绿色植被、灰色桥梁。场景数据另含对象 ID 和生成种子。',
+  }[state.cityView];
+  document.getElementById('hint').innerHTML=editingMap?'<b>拖动节点</b> 编辑 · <b>双击</b> 添加 · <b>Shift 点选两节点</b> 连路':
+    '<b>拖拽</b> 旋转 / 俯视平移 · <b>滚轮</b> 缩放 · <b>右键</b> 平移';
+}
+
+document.getElementById('cityPresetBtn').addEventListener('click',()=>{
+  state.junctionType='city'; state.projectName='程序化城市';
+  if(!state.sdMap) state.sdMap=generateSDMap(state);
+  state.cityView='sd'; syncAllControls(); regenerate(); fitSceneCamera(); setCameraMode('top'); recordChange();
+});
+document.querySelectorAll('[data-city-view]').forEach(button=>button.addEventListener('click',()=>{
+  state.cityView=button.dataset.cityView; editingMap=false; connectFrom=null;
+  regenerate();
+  if(state.cityView==='hd'){
+    const selected=currentCity.sd.nodes.find(n=>n.id===mapSelection?.id);
+    const node=selected||currentCity.sd.nodes.filter(n=>currentCity.sd.edges.filter(e=>e.from===n.id||e.to===n.id).length>=3)
+      .sort((a,b)=>Math.hypot(a.x,a.z)-Math.hypot(b.x,b.z))[0];
+    if(node){camState.target.set(node.x-45,0,node.z);orthoHalfHeight=145;updateOrthoProjection();}
+  }else fitSceneCamera();
+  setCameraMode(state.cityView==='scene'?'3d':'top'); recordChange();
+}));
+document.getElementById('generateCityBtn').addEventListener('click',()=>{
+  state.sdMap=generateSDMap(state); mapSelection=null; connectFrom=null;
+  regenerate(); fitSceneCamera(); recordChange(); showToast('已生成新的 SD 路网，可撤销恢复');
+});
+document.getElementById('editMapBtn').addEventListener('click',()=>{
+  editingMap=!editingMap; state.cityView='sd'; connectFrom=null;
+  regenerate(); setCameraMode('top'); recordChange();
+});
+document.getElementById('exportSceneBtn').addEventListener('click',()=>{
+  if(!currentCity?.validation.valid){showToast('请先修复 SD 路网错误');return;}
+  const data=createSceneDocument(currentCity);
+  downloadBlob(new Blob([JSON.stringify(data)],{type:'application/json;charset=utf-8'}),slugifyProjectName(state.projectName)+'.scene.json');
+  showToast('已导出 SD、HD、设施、地块与语义数据');
+});
+
+const mapRaycaster=new THREE.Raycaster(),mapPlane=new THREE.Plane(new THREE.Vector3(0,1,0),0);
+function mapWorldPoint(event){
+  const rect=renderer.domElement.getBoundingClientRect();
+  mapRaycaster.setFromCamera(new THREE.Vector2((event.clientX-rect.left)/rect.width*2-1,-(event.clientY-rect.top)/rect.height*2+1),activeCam);
+  const point=new THREE.Vector3();
+  return mapRaycaster.ray.intersectPlane(mapPlane,point)?point:null;
+}
+function hitMap(point){
+  const tolerance=orthoHalfHeight*2/window.innerHeight*11;
+  let node=null,best=tolerance;
+  for(const candidate of state.sdMap.nodes){
+    const d=Math.hypot(candidate.x-point.x,candidate.z-point.z);
+    if(d<best){node=candidate;best=d;}
+  }
+  if(node)return {kind:'node',id:node.id};
+  const nodes=new Map(state.sdMap.nodes.map(n=>[n.id,n]));
+  let edge=null;best=tolerance;
+  for(const candidate of state.sdMap.edges){
+    const a=nodes.get(candidate.from),b=nodes.get(candidate.to);
+    if(!a||!b)continue;
+    const dx=b.x-a.x,dz=b.z-a.z,t=Math.max(0,Math.min(1,((point.x-a.x)*dx+(point.z-a.z)*dz)/(dx*dx+dz*dz)));
+    const d=Math.hypot(point.x-a.x-t*dx,point.z-a.z-t*dz);
+    if(d<best){edge=candidate;best=d;}
+  }
+  return edge?{kind:'edge',id:edge.id}:null;
+}
+
+function commitMapEdit(previous){
+  const normalized=splitAtGradeCrossings(state.sdMap),validation=validateSDMap(normalized);
+  if(!validation.valid){state.sdMap=previous;showToast(validation.errors[0]);}
+  else state.sdMap=normalized;
+  regenerate(); recordChange();
+}
+function handleMapPointerDown(event){
+  if(!editingMap||!topDownMode||event.button!==0||state.junctionType!=='city')return false;
+  const p=mapWorldPoint(event); if(!p)return false;
+  const hit=hitMap(p);
+  if(!hit){mapSelection=null;renderMapSelection();return false;}
+  event.preventDefault(); mapSelection=hit;
+  if(event.shiftKey&&hit.kind==='node'){
+    if(connectFrom&&connectFrom!==hit.id){
+      const previous=structuredClone(state.sdMap);
+      const duplicate=state.sdMap.edges.some(e=>(e.from===connectFrom&&e.to===hit.id)||(e.to===connectFrom&&e.from===hit.id));
+      if(!duplicate){state.sdMap.edges.push({id:nextMapId('road'),from:connectFrom,to:hit.id,class:'local',lanesForward:1,lanesBackward:1,layer:0});commitMapEdit(previous);}
+      else showToast('这两个节点之间已有道路');
+      connectFrom=null;
+    }else{connectFrom=hit.id;showToast('按住 Shift 再点一个节点以连接道路');}
+    renderMapSelection();return true;
+  }
+  connectFrom=null;
+  if(hit.kind==='node'){
+    mapDrag={pointer:event.pointerId,nodeId:hit.id,previous:structuredClone(state.sdMap)};
+    renderer.domElement.setPointerCapture(event.pointerId);
+  }
+  renderMapSelection();return true;
+}
+function handleMapPointerMove(event){
+  if(!mapDrag||mapDrag.pointer!==event.pointerId)return false;
+  const p=mapWorldPoint(event),node=state.sdMap.nodes.find(n=>n.id===mapDrag.nodeId);
+  if(p&&node){node.x=Math.round(p.x);node.z=Math.round(p.z);renderMapSelection();}
+  return true;
+}
+function finishMapDrag(event){
+  if(!mapDrag||mapDrag.pointer!==event.pointerId)return false;
+  const previous=mapDrag.previous;mapDrag=null;
+  if(event.type==='pointercancel')state.sdMap=previous;
+  commitMapEdit(previous);return true;
+}
+function nextMapId(prefix){
+  const ids=new Set([...state.sdMap.nodes,...state.sdMap.edges].map(e=>e.id));
+  let index=1;while(ids.has(`${prefix}-${index}`))index++;
+  return `${prefix}-${index}`;
+}
+renderer.domElement.addEventListener('dblclick',event=>{
+  if(!editingMap||!topDownMode)return;
+  const p=mapWorldPoint(event);if(!p||hitMap(p))return;
+  const previous=structuredClone(state.sdMap),id=nextMapId('node');
+  state.sdMap.nodes.push({id,x:Math.round(p.x),z:Math.round(p.z),y:0});
+  mapSelection={kind:'node',id};commitMapEdit(previous);
+});
+
+function renderMapSelection(){
+  disposeGroup(selectionGroup);selectionGroup.clear();
+  const properties=document.getElementById('edgeProperties');properties.hidden=true;
+  const label=document.getElementById('mapSelection');
+  label.textContent='尚未选择节点或道路';
+  if(!editingMap||!mapSelection||!state.sdMap)return;
+  const nodes=new Map(state.sdMap.nodes.map(n=>[n.id,n]));
+  const addLine=(a,b)=>{
+    const mesh=pathRibbon([{x:a.x,y:a.z},{x:b.x,y:b.z}],2.2,1.1,0x83f1c4);
+    if(mesh)selectionGroup.add(mesh);
+  };
+  if(mapSelection.kind==='node'){
+    const node=nodes.get(mapSelection.id);if(!node)return;
+    label.textContent=`节点 ${node.id} · (${node.x.toFixed(0)}, ${node.z.toFixed(0)}) m`;
+    const mesh=new THREE.Mesh(new THREE.CylinderGeometry(5,5,0.2,16),matStd(0x83f1c4));mesh.position.set(node.x,1.2,node.z);selectionGroup.add(mesh);
+    for(const edge of state.sdMap.edges.filter(e=>e.from===node.id||e.to===node.id))addLine(nodes.get(edge.from),nodes.get(edge.to));
+  }else{
+    const edge=state.sdMap.edges.find(e=>e.id===mapSelection.id);if(!edge)return;
+    label.textContent=`道路 ${edge.id} · ${edge.from} → ${edge.to}`;
+    properties.hidden=false;
+    document.getElementById('edgeClass').value=edge.class;
+    document.getElementById('edgeForward').value=edge.lanesForward;
+    document.getElementById('edgeBackward').value=edge.lanesBackward;
+    document.getElementById('edgeLayer').value=edge.layer;
+    addLine(nodes.get(edge.from),nodes.get(edge.to));
+  }
+}
+for(const [id,field]of [['edgeClass','class'],['edgeForward','lanesForward'],['edgeBackward','lanesBackward'],['edgeLayer','layer']]){
+  document.getElementById(id).addEventListener('change',event=>{
+    const edge=state.sdMap?.edges.find(e=>e.id===mapSelection?.id);if(!edge)return;
+    const previous=structuredClone(state.sdMap);
+    edge[field]=field==='class'?event.target.value:field==='layer'?Number(event.target.value):Math.max(0,Math.min(4,Math.round(Number(event.target.value)||0)));
+    commitMapEdit(previous);
+  });
+}
+document.getElementById('deleteMapSelection').addEventListener('click',()=>{
+  if(!mapSelection||!state.sdMap)return;
+  const previous=structuredClone(state.sdMap),{kind,id}=mapSelection;
+  if(kind==='node'){state.sdMap.nodes=state.sdMap.nodes.filter(n=>n.id!==id);state.sdMap.edges=state.sdMap.edges.filter(e=>e.from!==id&&e.to!==id);}
+  else state.sdMap.edges=state.sdMap.edges.filter(e=>e.id!==id);
+  mapSelection=null;connectFrom=null;commitMapEdit(previous);
+});
+
 // ---------------------------------------------------------------- INIT
+const startupMode=new URLSearchParams(window.location.search).get('mode');
+if(startupMode==='city'){ state.junctionType='city'; state.cityView='sd'; }
 syncAllControls();
 syncTrafficButton();
 renderArmsList();
