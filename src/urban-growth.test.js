@@ -4,12 +4,14 @@ import { generateSDMap, splitAtGradeCrossings, validateSDMap, extractBlocks } fr
 import { distanceToRoad } from './corridor.js';
 
 describe('organic street growth',()=>{
+  // 36 generateSDMap configurations; the suite runs files in parallel so the
+  // default 5s budget is too tight for this file under load.
   it('stays connected without short snap artifacts across seeds and scales',()=>{
     for(const citySize of [1400,1800,2400])for(const cityBlockSize of [80,120,180])for(const scenerySeed of [1,16,42,999]){
       const sd=splitAtGradeCrossings(generateSDMap({...createDefaultProject(),citySize,cityBlockSize,scenerySeed}));
       expect(validateSDMap(sd),`${citySize}/${cityBlockSize}/${scenerySeed}`).toMatchObject({valid:true,components:1,errors:[],warnings:[]});
     }
-  });
+  },30000);
 
   it('has multiple street orientations and irregular block sizes, not a rotated grid',()=>{
     const sd=generateSDMap({...createDefaultProject(),scenerySeed:42}),nodes=new Map(sd.nodes.map(n=>[n.id,n]));

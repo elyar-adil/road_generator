@@ -38,7 +38,47 @@ export function sanitizeSDMap(value) {
 }
 
 export function generateSDMap(cfg) {
-  return growUrbanMap(cfg);
+  return simplifySDMap(growUrbanMap(cfg));
+}
+
+const wrapAngle = a => Math.atan2(Math.sin(a), Math.cos(a));
+const CLASS_RANK = { local: 0, collector: 1, arterial: 2, highway: 3 };
+
+// 有机生长让街道每步随机转折,一连串浅折角把路网切成碎片——每个折点
+// 还会派生独立的路口箱体(截断、标线断缝、人行道环带)。把折角小于
+// 阈值的度 2 延续节点合并成一条直路:街道变长变直,路口只留在真交叉口。
+export function simplifySDMap(map, kinkDeg = 14) {
+  const merged = structuredClone(map);
+  let changed = true, guard = 0;
+  while (changed && guard++ < 10) {
+    changed = false;
+    const nodes = new Map(merged.nodes.map(n => [n.id, n]));
+    const incident = new Map(merged.nodes.map(n => [n.id, []]));
+    for (const e of merged.edges) { incident.get(e.from)?.push(e); incident.get(e.to)?.push(e); }
+    for (const [id, list] of incident) {
+      if (changed || list.length !== 2 || list[0].id === list[1].id) continue;
+      const [e1, e2] = list;
+      if (e1.layer !== 0 || e2.layer !== 0) continue;
+      const node = nodes.get(id), a = nodes.get(e1.from === id ? e1.to : e1.from), b = nodes.get(e2.from === id ? e2.to : e2.from);
+      if (!node || !a || !b) continue;
+      const inAngle = Math.atan2(node.z - a.z, node.x - a.x);
+      const outAngle = Math.atan2(b.z - node.z, b.x - node.x);
+      if (Math.abs(wrapAngle(outAngle - inAngle)) > kinkDeg * Math.PI / 180) continue;
+      // 通行能力按路径方向取两侧较大值,等级取较高者。
+      const f1 = e1.to === id ? e1.lanesForward : e1.lanesBackward;
+      const f2 = e2.from === id ? e2.lanesForward : e2.lanesBackward;
+      const b1 = e1.to === id ? e1.lanesBackward : e1.lanesForward;
+      const b2 = e2.from === id ? e2.lanesBackward : e2.lanesForward;
+      const cls = CLASS_RANK[e1.class] >= CLASS_RANK[e2.class] ? e1.class : e2.class;
+      merged.edges = merged.edges.filter(e => e !== e1 && e !== e2)
+        .concat([{ ...(CLASS_RANK[e1.class] >= CLASS_RANK[e2.class] ? e1 : e2),
+          id: e1.id, from: e1.from === id ? e1.to : e1.from, to: e2.from === id ? e2.to : e2.from,
+          class: cls, lanesForward: Math.max(f1, f2), lanesBackward: Math.max(b1, b2) }]);
+      merged.nodes = merged.nodes.filter(n => n.id !== id);
+      changed = true;
+    }
+  }
+  return merged;
 }
 
 // Normalize same-level crossings into real junctions. Different layers retain

@@ -28,6 +28,7 @@ import {
   forkIslandPolygon,
 } from './roundabout.js';
 import { pathDistanceAtRadius, mergeYieldMarks } from './graft.js';
+import { JUNCTION_SPEC as SPEC } from './junction-spec.js';
 
 // ---------------------------------------------------------------------------
 // Arrow outlines (design spec, units cm; local frame [lateral, forward]).
@@ -54,7 +55,7 @@ const ARROW_STRAIGHT_LEFT_RIGHT = [
   [-75, 800], [-475, 1250], [-475, 1750], [-675, 950], [-475, 200], [-475, 650], [-75, 200],
 ];
 
-function arrowPolygons(types) {
+export function arrowPolygons(types) {
   const arr = [...new Set(types && types.length ? types : ['straight'])];
   const key = arr.slice().sort().join('+');
   if (key === 'left+straight') return [ARROW_STRAIGHT_LEFT_RAW];
@@ -528,7 +529,7 @@ export function deriveRoadScene(model, state, random = Math.random, topology = n
     if (state.showCrosswalk && hasCrosswalkSpace && (arm.laneIn > 0 || arm.laneOut > 0)) {
       const sMin = g.outOuterS, sMax = g.inOuterS;
       const bars = [];
-      const stripeW = 0.5, gap = 0.45;
+      const stripeW = SPEC.crosswalk.barW, gap = SPEC.crosswalk.pitch - SPEC.crosswalk.barW;
       let s = sMin + stripeW / 2 + 0.3;
       while (s < sMax - 0.3) {
         bars.push([g.wp(crosswalkStart, s), g.wp(crosswalkEnd, s)]);

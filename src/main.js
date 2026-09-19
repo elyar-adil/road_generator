@@ -1,5 +1,11 @@
 import * as THREE from 'three';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { createSky, bakeSkyEnvironment, SUN_DIR, SKY_FOG } from './sky.js';
 import {
   createDefaultProject,
   createProjectDocument,
@@ -32,7 +38,8 @@ import { computeLaneTopology } from './lane-topology.js';
 import { buildRoadModel } from './road-model.js';
 import { deriveRoadScene } from './lane-derive.js';
 import { buildCity, createSceneDocument } from './city.js';
-import { renderCity } from './city-render.js';
+import { renderCity, cityTrafficLights, groundMaterial, leafCardTexture } from './city-render.js';
+import { EgoController, buildRouteGraph, createEgoCar, createRouteLine, signalPhase } from './ego.js';
 import { generateSDMap, splitAtGradeCrossings, validateSDMap } from './sd-map.js';
 import { renderRoadScene, ROAD_THEME, matStd, boxAlong, flatPoly, pathRibbon, glowMat } from './render.js';
 import {
@@ -54,12 +61,23 @@ if(state.junctionType==='city' && !state.sdMap) state.sdMap=generateSDMap(state)
 const history = new ProjectHistory(state);
 let currentCity=null, editingMap=false, mapSelection=null, mapDrag=null, connectFrom=null;
 let previousSceneType=null;
+// Ego vehicle runtime state (never persisted in the project); egoGroup joins
+// the scene right after the THREE setup below.
+let ego=null, egoCar=null, egoRouteLine=null, egoPickMode=false, egoWanted='idle', egoDestination=null, egoStatusTimer=0;
+let citySignalGroups=[];
 
 // ---------------------------------------------------------------- THREE SETUP
 const container = document.getElementById('canvas-container');
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x8fb8d8);
-scene.fog = new THREE.Fog(0x8fb8d8, 90, 240);
+// 写实天空穹顶:渐变 + 太阳 + FBM 积云。覆盖整个视口(深度测试关闭,
+// 最先绘制),相机移动时穹顶跟随,所以地平线永远不会穿帮。
+const sky = createSky();
+scene.add(sky.dome);
+scene.fog = new THREE.Fog(SKY_FOG, 90, 240);
+// Ego vehicle (roam + navigation) lives outside worldGroup so regenerations
+// of the city meshes never dispose it.
+const egoGroup = new THREE.Group();
+scene.add(egoGroup);
 
 const persp = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 20000);
 let orthoHalfHeight = 60;
@@ -89,27 +107,83 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.shadowMap.autoUpdate = false;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.08;
+renderer.toneMappingExposure = 1.05;
 container.appendChild(renderer.domElement);
 
+// Image-based ambient light baked from the sky dome itself: every PBR
+// material (asphalt, glass, foliage) now reflects the actual sky colours and
+// the sun's bearing instead of a neutral indoor radiance map.
+scene.environment = bakeSkyEnvironment(renderer, sky.dome.material);
+scene.environmentIntensity = 0.5;
+
+// Post chain: HDR 渲染目标(4x MSAA)→ 环境光遮蔽 → 轻微 bloom → OutputPass
+// 统一做 ACES 色调映射与 sRGB 输出。GTAO 是照片感的地基:建筑根部、路缘、
+// 车辆与树干和地面接触处的阴影不是模型自带的,少了它所有物体都像悬浮。
+// 示意图视图(SD/HD/语义)保持直渲染,保证纯色 overlay 不被 AO/bloom 弄脏。
+const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(2, 2, {type:THREE.HalfFloatType, samples:4}));
+composer.setPixelRatio(renderer.getPixelRatio());
+composer.setSize(window.innerWidth, window.innerHeight);
+const renderPass = new RenderPass(scene, persp);
+const gtaoPass = new GTAOPass(scene, persp, window.innerWidth, window.innerHeight);
+// GTAO 的法向/深度 G-buffer 用统一材质重绘场景:alpha 裁剪的叶簇卡会被当成
+// 实心四边形,树冠自遮挡成一团黑。给它的法向材质打补丁 —— 只对带
+// aLeafCard 标记的顶点按叶簇贴图 alpha 丢弃片段,其余物体保持原样。
+gtaoPass.normalMaterial = (() => {
+  const material = new THREE.MeshNormalMaterial();
+  const leaf = leafCardTexture();
+  material.onBeforeCompile = shader => {
+    shader.uniforms.leafMap = { value: leaf };
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float aLeafCard;\nvarying vec2 vLeafUv;\nvarying float vLeafCard;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvLeafUv = uv; vLeafCard = aLeafCard;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('void main() {', 'uniform sampler2D leafMap;\nvarying vec2 vLeafUv;\nvarying float vLeafCard;\nvoid main() {')
+      .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\nif (vLeafCard > 0.5 && texture2D(leafMap, vLeafUv).a < 0.45) discard;');
+  };
+  return material;
+})();
+gtaoPass.output = GTAOPass.OUTPUT.Default;
+gtaoPass.blendIntensity = 0.85;
+gtaoPass.updateGtaoMaterial({ radius: 0.8, distanceExponent: 1.1, thickness: 1.4, scale: 1.0, samples: 16 });
+gtaoPass.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 4, rings: 2, samples: 8 });
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth/2, window.innerHeight/2), 0.14, 0.5, 1.05);
+composer.addPass(renderPass);
+composer.addPass(gtaoPass);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());
+let postActive = false;
+function syncPostMode(){
+  const standalone = state.junctionType !== 'city';
+  const schematic = !standalone && ['sd','hd','semantic'].includes(state.cityView);
+  postActive = !schematic;
+  gtaoPass.enabled = !schematic;
+}
+function renderFrame(){
+  syncPostMode();
+  if(postActive){ renderPass.camera = activeCam; gtaoPass.camera = activeCam; composer.render(); }
+  else renderer.render(scene, activeCam);
+}
+
 // lights
-const hemi = new THREE.HemisphereLight(0xdff0ff, 0x33422a, 0.65);
+const hemi = new THREE.HemisphereLight(0xcfe2f8, 0x4a5340, 0.4);
 scene.add(hemi);
-const sun = new THREE.DirectionalLight(0xfff3da, 1.15);
-sun.position.set(60, 90, 40);
+const sun = new THREE.DirectionalLight(0xfff1d6, 1.95);
+sun.position.copy(SUN_DIR).multiplyScalar(120);
 sun.castShadow = true;
-sun.shadow.mapSize.set(2048,2048);
+sun.shadow.mapSize.set(4096,4096);
 sun.shadow.camera.left=-90; sun.shadow.camera.right=90;
 sun.shadow.camera.top=90; sun.shadow.camera.bottom=-90;
-sun.shadow.camera.far=300;
-sun.shadow.bias=-0.0004;
+sun.shadow.camera.far=3000;
+sun.shadow.bias=-0.0003;
+sun.shadow.normalBias=0.6;
 scene.add(sun);
-const fillLight = new THREE.DirectionalLight(0xbcd6ff, 0.25);
-fillLight.position.set(-50,40,-60);
+scene.add(sun.target);
+const fillLight = new THREE.DirectionalLight(0xbcd6ff, 0.18);
+fillLight.position.set(50,40,60);
 scene.add(fillLight);
 
 // ground
-const ground = new THREE.Mesh(new THREE.CircleGeometry(220,96), new THREE.MeshStandardMaterial({color:ROAD_THEME.ground, roughness:1}));
+const ground = new THREE.Mesh(new THREE.CircleGeometry(220,96), groundMaterial());
 ground.rotation.x = -Math.PI/2;
 ground.receiveShadow = true;
 scene.add(ground);
@@ -149,6 +223,33 @@ function updatePerspCamera(){
   persp.lookAt(p.target);
 }
 updatePerspCamera();
+
+// Automation hook: deterministic camera placement for visual-regression shots
+// (Playwright) and quick manual framing. Exposes live state read-only.
+window.__studio = {
+  state, camState, setCameraMode,
+  setCamera({x, z, theta, phi, radius}) {
+    if (x !== undefined) camState.target.x = x;
+    if (z !== undefined) camState.target.z = z;
+    if (theta !== undefined) camState.theta = theta;
+    if (phi !== undefined) camState.phi = phi;
+    if (radius !== undefined) camState.radius = radius;
+    updatePerspCamera();
+  },
+  placeCamera(from, to) {
+    // updatePerspCamera derives the camera height as radius*cos(phi) in world
+    // space (absolute, not relative to the target), so the spherical radius
+    // and phi must come from the camera height, not the target height.
+    const dx = from.x - to.x, dz = from.z - to.z;
+    const horiz = Math.hypot(dx, dz);
+    camState.target.set(to.x, to.y ?? 0, to.z);
+    camState.theta = Math.atan2(dx, dz);
+    camState.radius = Math.hypot(horiz, from.y);
+    camState.phi = Math.atan2(horiz, from.y);
+    updatePerspCamera();
+  },
+  city: () => currentCity,
+};
 
 let dragMode = null, lastX=0,lastY=0, activePointerId=null;
 renderer.domElement.addEventListener('pointerdown', e=>{
@@ -209,6 +310,8 @@ window.addEventListener('resize', ()=>{
   persp.updateProjectionMatrix();
   updateOrthoProjection();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setPixelRatio(renderer.getPixelRatio());
+  composer.setSize(window.innerWidth, window.innerHeight);
 });
 
 // ---------------------------------------------------------------- GEOMETRY HELPERS
@@ -362,6 +465,10 @@ function regenerate(){
     if(!state.sdMap) state.sdMap=generateSDMap(state);
     currentCity=buildCity(state);
     renderCity(currentCity,worldGroup,{...state,sdNodesVisible:editingMap});
+    const signal=cityTrafficLights(currentCity,state);
+    worldGroup.add(signal.group);
+    citySignalGroups=signal.lampGroups;
+    resetEgo();
     for(const group of [topologyGroup,segmentGroup]){ disposeGroup(group); group.clear(); group.visible=false; }
     const extent=currentCity.extent;
     configureSceneExtent(extent,state.cityView==='sd'||state.cityView==='hd'||state.cityView==='semantic');
@@ -376,6 +483,10 @@ function regenerate(){
     return;
   }
   currentCity=null;
+  if(ego)ego.stop();
+  egoFollow=false;
+  citySignalGroups=[];
+  egoGroup.visible=false;
   disposeGroup(selectionGroup); selectionGroup.clear();
   configureSceneExtent(100,false);
   if(previousSceneType==='city') fitSceneCamera();
@@ -424,6 +535,14 @@ function animate(now=performance.now()){
   const delta = Math.min(0.1,(now-lastFrame)/1000);
   lastFrame = now;
   if(!state.trafficPaused) trafficTime += delta*state.trafficSpeed;
+  if(ego&&state.junctionType==='city'){
+    ego.update(delta,trafficTime);
+    syncEgo();
+    updateEgoFollow(delta);
+    updateEgoRouteLine();
+    egoStatusTimer+=delta;
+    if(egoStatusTimer>0.3){egoStatusTimer=0;syncEgoUI();}
+  }
   const t = trafficTime;
   const n = trafficLights.length;
   if(n>0){
@@ -443,7 +562,24 @@ function animate(now=performance.now()){
       });
     });
   }
-  renderer.render(scene, activeCam);
+  // City signals: NS and EW approaches alternate on the shared cycle
+  // (signalPhase in ego.js) so lamps, the ego car and any future background
+  // traffic take turns on exactly the same timeline.
+  if(citySignalGroups.length&&state.junctionType==='city'){
+    const {ns,ew}=signalPhase(trafficTime);
+    for(const set of citySignalGroups){
+      const light=set.axis==='ns'?ns:ew;
+      for(const l of set.lamps){
+        const on=l.role===light;
+        l.mesh.material.color.setHex(on?l.on:l.off);
+        l.mesh.material.emissive.setHex(on?l.on:l.off);
+        l.mesh.material.emissiveIntensity=on?1.5:0.22;
+      }
+    }
+  }
+  sky.update(trafficTime);
+  sky.follow(activeCam);
+  renderFrame();
 }
 animate();
 
@@ -1014,7 +1150,7 @@ fileInput.addEventListener('change',async()=>{
 });
 
 document.getElementById('shotBtn').addEventListener('click',()=>{
-  renderer.render(scene,activeCam);
+  renderFrame();
   renderer.domElement.toBlob(blob=>{
     if(!blob){
       showToast('图片导出失败');
@@ -1094,11 +1230,23 @@ window.addEventListener('error',event=>{
 function configureSceneExtent(extent, schematic){
   const city=state.junctionType==='city';
   ground.scale.setScalar(city?extent*1.55/220:1);
-  ground.material.color.setHex(schematic?0x17282c:ROAD_THEME.ground);
-  scene.background.setHex(schematic?0x17282c:0x8fb8d8);
-  scene.fog=schematic?null:new THREE.Fog(0x8fb8d8,city?extent*3:90,city?extent*7:240);
-  const size=city?extent*1.1:90;
-  sun.position.set(size*0.7,size*1.4,size*0.5);
+  // 草地纹理平铺保持 ~2.8m 一格,与尺度无关。
+  ground.material.color.setHex(schematic?0x17282c:0xffffff);
+  if(ground.material.map){
+    const scale=ground.scale.x;
+    ground.material.map.repeat.set(160*scale,160*scale);
+  }
+  sky.dome.visible=!schematic;
+  scene.background=schematic?new THREE.Color(0x17282c):null;
+  scene.fog=schematic?null:new THREE.Fog(SKY_FOG,city?extent*3:90,city?extent*7.5:240);
+  const size=city?Math.min(extent*0.7,300):90;
+  // Keep the shadow frustum tight and centred on where the author is looking:
+  // a whole-city frustum at 4k still yields ~1m/texel shadows. The offset
+  // direction is pinned to SUN_DIR so light, sky and IBL always agree.
+  sun.position.copy(SUN_DIR).multiplyScalar(size*1.6)
+    .add(new THREE.Vector3(camState.target.x,0,camState.target.z));
+  sun.target.position.set(camState.target.x,0,camState.target.z);
+  sun.target.updateMatrixWorld();
   Object.assign(sun.shadow.camera,{left:-size,right:size,top:size,bottom:-size,far:size*5});
   sun.shadow.camera.updateProjectionMatrix();
   gridHelper.scale.setScalar(city?extent/100:1);
@@ -1167,6 +1315,126 @@ document.getElementById('exportSceneBtn').addEventListener('click',()=>{
   const data=createSceneDocument(currentCity);
   downloadBlob(new Blob([JSON.stringify(data)],{type:'application/json;charset=utf-8'}),slugifyProjectName(state.projectName)+'.scene.json');
   showToast('已导出 SD、HD、设施、地块与语义数据');
+});
+
+// ---------------------------------------------------------------- EGO VEHICLE (roam + GPS navigation)
+let egoSdKey='';
+function resetEgo(){
+  if(!currentCity||!currentCity.validation.valid){egoGroup.visible=false;syncEgoUI();return;}
+  egoGroup.visible=true;
+  const sdKey=JSON.stringify(state.sdMap);
+  if(!ego||sdKey!==egoSdKey){
+    // Road network changed: respawn the car and re-apply the wanted mode.
+    egoSdKey=sdKey;
+    if(!ego){ego=new EgoController(currentCity);egoCar=createEgoCar();egoGroup.add(egoCar);}
+    else ego.setCity(currentCity);
+    // Spawn where the author is looking, so the car is immediately visible.
+    ego.spawnNear({ x: camState.target.x, z: camState.target.z });
+    ego.mode='idle';ego.arrived=true;ego.path=null;
+    if(egoWanted==='roam')ego.startRoam();
+    else if(egoWanted==='nav'&&egoDestination)ego.navigateTo(egoDestination);
+    updateEgoRouteLine(true);
+  }else{
+    ego.city=currentCity;
+    ego.adj=buildRouteGraph(currentCity);
+  }
+  syncEgoUI();
+}
+function syncEgo(){
+  const pose=ego?.currentPose();
+  if(!pose){egoCar.visible=false;return;}
+  egoCar.visible=true;
+  egoCar.position.set(pose.x,pose.y,pose.z);
+  egoCar.rotation.y=Math.atan2(pose.tx,pose.tz);
+}
+function updateEgoRouteLine(force){
+  const version=(!ego||force)?-1:(ego.arrived?-1:ego.routeVersion);
+  if(!force&&version===egoLineVersion)return;
+  egoLineVersion=version;
+  if(egoRouteLine){egoGroup.remove(egoRouteLine);egoRouteLine.geometry.dispose();egoRouteLine.material.dispose();egoRouteLine=null;}
+  if(ego&&ego.path&&!ego.arrived){egoRouteLine=createRouteLine(ego.path);egoGroup.add(egoRouteLine);}
+}
+let egoLineVersion=-1;
+function syncEgoUI(){
+  const roamBtn=document.getElementById('egoRoamBtn'),navBtn=document.getElementById('egoNavBtn'),status=document.getElementById('egoStatus'),followBtn=document.getElementById('egoFollowBtn');
+  if(!roamBtn)return;
+  const active=state.junctionType==='city'&&!!ego;
+  roamBtn.hidden=navBtn.hidden=status.hidden=followBtn.hidden=!active;
+  if(!active)return;
+  navBtn.classList.toggle('active',egoPickMode);
+  followBtn.classList.toggle('active',egoFollow);
+  roamBtn.textContent=ego.mode==='roam'?'停止漫游':'自车漫游';
+  if(egoPickMode)status.textContent='点击场景任意位置设置目的地';
+  else if(ego.mode==='nav'&&!ego.arrived)status.textContent=`导航中 · 距目的地 ${ego.remaining()>=1000?`${(ego.remaining()/1000).toFixed(2)} km`:`${Math.round(ego.remaining())} m`}`;
+  else if(ego.mode==='roam')status.textContent=`漫游中 · 本段剩余 ${Math.round(ego.remaining())} m`;
+  else if(ego.arrived&&egoDestination&&ego.mode==='nav')status.textContent='已到达目的地';
+  else status.textContent='自车待命';
+}
+// Chase camera: the orbit target tracks the car and theta swings in behind
+// the heading, while phi/radius ease toward a close-over-shoulder framing.
+let egoFollow=false, egoFollowSnap=null;
+function updateEgoFollow(delta){
+  if(!egoFollow||topDownMode)return;
+  const pose=ego?.currentPose();
+  if(!pose)return;
+  const k=1-Math.exp(-delta*5);
+  camState.target.x+=(pose.x-camState.target.x)*k;
+  camState.target.z+=(pose.z-camState.target.z)*k;
+  const wantTheta=Math.atan2(-pose.tx,-pose.tz);
+  let dTheta=(wantTheta-camState.theta)%(Math.PI*2);
+  if(dTheta>Math.PI)dTheta-=Math.PI*2;
+  if(dTheta<-Math.PI)dTheta+=Math.PI*2;
+  camState.theta+=dTheta*Math.min(1,delta*2.5);
+  camState.phi+=(1.15-camState.phi)*Math.min(1,delta*1.5);
+  if(camState.radius>40)camState.radius+=(22-camState.radius)*Math.min(1,delta*1.5);
+  updatePerspCamera();
+}
+function setEgoFollow(on){
+  egoFollow=on;
+  if(on){
+    egoFollowSnap={theta:camState.theta,phi:camState.phi,radius:camState.radius,tx:camState.target.x,tz:camState.target.z};
+    if(camState.radius>40)camState.radius=22;
+    if(topDownMode)setCameraMode('3d');
+    const pose=ego?.currentPose();
+    if(pose){camState.target.x=pose.x;camState.target.z=pose.z;}
+    updateEgoFollow(1);
+  }else if(egoFollowSnap){
+    camState.theta=egoFollowSnap.theta;camState.phi=egoFollowSnap.phi;camState.radius=egoFollowSnap.radius;
+    camState.target.x=egoFollowSnap.tx;camState.target.z=egoFollowSnap.tz;
+    updatePerspCamera();
+  }
+  syncEgoUI();
+}
+document.getElementById('egoRoamBtn').addEventListener('click',()=>{
+  if(state.junctionType!=='city')return;
+  if(!ego)resetEgo();
+  if(ego.mode==='roam'){ego.stop();egoWanted='idle';}
+  else{egoWanted='roam';egoDestination=null;ego.startRoam();if(ego.mode!=='roam')showToast('漫游路线规划失败,请重试');}
+  updateEgoRouteLine(true);syncEgoUI();
+});
+document.getElementById('egoNavBtn').addEventListener('click',()=>{
+  if(state.junctionType!=='city')return;
+  if(!ego)resetEgo();
+  egoPickMode=!egoPickMode;
+  syncEgoUI();
+});
+document.getElementById('egoFollowBtn').addEventListener('click',()=>{
+  if(state.junctionType!=='city'||!ego)return;
+  setEgoFollow(!egoFollow);
+});
+let egoPickDown=null;
+renderer.domElement.addEventListener('pointerdown',e=>{egoPickDown=[e.clientX,e.clientY];});
+renderer.domElement.addEventListener('click',e=>{
+  if(!egoPickMode||state.junctionType!=='city')return;
+  if(!egoPickDown||Math.hypot(e.clientX-egoPickDown[0],e.clientY-egoPickDown[1])>6)return;
+  const p=mapWorldPoint(e);if(!p)return;
+  let best=null,bestD=Infinity;
+  for(const n of state.sdMap.nodes){const d=Math.hypot(n.x-p.x,n.z-p.z);if(d<bestD){bestD=d;best=n;}}
+  if(!best)return;
+  egoPickMode=false;egoWanted='nav';egoDestination=best.id;
+  if(!ego)resetEgo();
+  if(!ego.navigateTo(best.id)){showToast('无法规划到该目的地的路线');egoWanted='idle';}
+  updateEgoRouteLine(true);syncEgoUI();
 });
 
 const mapRaycaster=new THREE.Raycaster(),mapPlane=new THREE.Plane(new THREE.Vector3(0,1,0),0);

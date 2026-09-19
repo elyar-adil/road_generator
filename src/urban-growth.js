@@ -47,7 +47,7 @@ export function growUrbanMap(cfg) {
     x += influence * Math.cos(riverAngle(p.z) * 4); z += influence * Math.sin(riverAngle(p.z) * 4);
     const base = Math.atan2(z, x) / 4;
     const direction = [0, 1, 2, 3].map(i => base + i * Math.PI / 2).sort((a, b) => Math.abs(wrap(a - previous)) - Math.abs(wrap(b - previous)))[0];
-    const bend = 0.12 + 0.16 * organic;
+    const bend = 0.05 + 0.09 * organic;
     return previous + Math.max(-bend, Math.min(bend, wrap(direction - previous)));
   }
   const nodes = [], edges = [], byId = new Map();

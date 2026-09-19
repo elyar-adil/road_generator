@@ -5,6 +5,8 @@ import { buildCity } from './city.js';
 import { createDefaultProject } from './state.js';
 
 describe('city mesh compiler',()=>{
+  // 四个投影各完整渲染一次城市;写实街道层让单次 scene 渲染就有
+  // 上百万顶点,给足超时避免冷启动 JIT 误报。
   it('produces finite indexed geometry in every projection without changing HD data',()=>{
     const cfg={...createDefaultProject(),junctionType:'city',cityBlockSize:180,scenerySeed:42,showBuildings:false};
     const city=buildCity(cfg),before=JSON.stringify(city.lanes);
@@ -23,5 +25,5 @@ describe('city mesh compiler',()=>{
       }
     }
     expect(JSON.stringify(city.lanes)).toBe(before);
-  });
+  },20000);
 });

@@ -1,7 +1,16 @@
 import { deriveHDMap, crossSection } from './hd-map.js';
 import { generateSDMap, splitAtGradeCrossings, validateSDMap, extractBlocks, polygonArea, randomFromSeed, hashSeed } from './sd-map.js';
-import { distanceToRoad } from './corridor.js';
+import { distanceToRoad, roadPoint } from './corridor.js';
 import { SEMANTIC_CLASSES } from './semantics.js';
+
+function pointInRing(x, z, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i], b = ring[j];
+    if ((a.z > z) !== (b.z > z) && x < (b.x - a.x) * (z - a.z) / (b.z - a.z) + a.x) inside = !inside;
+  }
+  return inside;
+}
 
 function clip(ring, nx, nz, constant) {
   const out = [];
@@ -65,13 +74,24 @@ function deriveDistricts(sd, hd, cfg) {
   const elevated = hd.roads.filter(r => r.layer !== 0);
   for (const face of extractBlocks(sd)) {
     const seed = hashSeed(cfg.scenerySeed, face.id), rand = randomFromSeed(seed);
-    const distances = face.edgeIds.map(id => crossSection(edges.get(id), cfg.laneWidth).width / 2 + cfg.sidewalkWidth + 1);
+    const distances = face.edgeIds.map(id => crossSection(edges.get(id), cfg.laneWidth).width / 2 + cfg.sidewalkWidth);
     const ring = inset(face.ring, distances);
     if (ring.length < 3 || polygonArea(ring) < 100) continue;
     const centreDistance = Math.min(...centres.map(c => Math.hypot((c.x - (face.ring[0]?.x || 0)), (c.z - (face.ring[0]?.z || 0)))));
     const blockScale = Math.sqrt(polygonArea(ring));
     const park = rand() < 0.055 + (blockScale > 180 ? 0.09 : 0) || face.ring.length > 9 && rand() < 0.12;
     blocks.push({ id: face.id, ring, park, seed });
+    if (park) {
+      // Parks get a small grove, rejection-sampled inside the block ring.
+      const pb = bounds(ring), target = 6 + Math.floor(rand() * 7);
+      let planted = 0;
+      for (let k = 0; k < target * 4 && planted < target; k++) {
+        const x = pb.minX + rand() * (pb.maxX - pb.minX), z = pb.minZ + rand() * (pb.maxZ - pb.minZ);
+        if (!pointInRing(x, z, ring)) continue;
+        trees.push({ x, z, size: 4.5 + rand() * 3.5, seed: hashSeed(seed, `park/${k}`) });
+        planted++;
+      }
+    }
     const lots = splitParcels(ring, rand);
     lots.forEach((lot, i) => {
       const id = `${face.id}/parcel-${i}`, lotSeed = hashSeed(seed, i), pr = randomFromSeed(lotSeed);
@@ -98,11 +118,48 @@ function deriveDistricts(sd, hd, cfg) {
       const arterialRoad = face.edgeIds.some(id => ['arterial', 'highway'].includes(edges.get(id)?.class));
       const heightBias = arterialRoad ? 1.35 : 1;
       const floors = Math.max(2, Math.round(2 + urbanity ** 1.65 * heightBias * (8 + pr() * 29) + pr() * 2));
-      buildings.push({ id: `${id}/building`, parcelId: id, blockId: face.id, seed: lotSeed, ring: footprint,
-        x, z, h: floors * 3.2, floors, variant: Math.floor(pr() * 6),
-        style: floors > 16 ? 'tower' : arterialRoad && floors > 8 ? 'mixed-use' : nearRiver ? 'waterfront' : 'residential' });
+      const style = floors > 16 ? 'tower' : arterialRoad && floors > 8 ? 'mixed-use' : nearRiver ? 'waterfront' : 'residential';
+      // Facade tiles are grouped per style so districts read coherently while
+      // the exact tile still varies per building.
+      const variantRange = { tower: [8, 20], 'mixed-use': [4, 8], waterfront: [2, 6], residential: [0, 4] }[style];
+      const building = { id: `${id}/building`, parcelId: id, blockId: face.id, seed: lotSeed, ring: footprint,
+        x, z, h: floors * 3.2, floors, variant: variantRange[0] + Math.floor(pr() * (variantRange[1] - variantRange[0])),
+        style, pitched: style === 'residential' && floors <= 5 && area < 170 };
+      if (style === 'tower' && floors > 14) {
+        const tierRing = inset(footprint, 3 + pr() * 2);
+        if (tierRing.length >= 3 && polygonArea(tierRing) > 40) {
+          building.tierRing = tierRing;
+          building.podiumFloors = Math.max(3, Math.min(floors - 8, Math.round(3 + pr() * 3)));
+        }
+      }
+      buildings.push(building);
     });
   }
+  // Street trees line the sidewalks of every ground road (locals included,
+  // one side only), denser on collectors/arterials, plus the planted median
+  // belts (GB 50647 主干路中央分隔带绿化). Thinned deterministically if the
+  // city would exceed the vegetation budget.
+  for (const road of hd.roads) {
+    if (road.layer !== 0 || road.kind === 'highway') continue;
+    const local = road.kind === 'local';
+    const total = road.path.at(-1).s, inner = road.trimStart + 14, outer = total - road.trimEnd - 14;
+    const lateral = road.width / 2 + cfg.sidewalkWidth * 0.6;
+    const spacing = local ? 30 : 15;
+    for (let s = inner; s < outer; s += spacing) {
+      const jitter = (noise(s * 1.7, s * 0.9, 5) - 0.5) * 6;
+      for (const side of local ? [-1] : [-1, 1]) {
+        const p = roadPoint(road, Math.max(inner, Math.min(outer, s + jitter)), side * lateral + (noise(s, s * side, 9) - 0.5));
+        trees.push({ x: p.x, z: p.z, size: 4.5 + noise(s, s * side, 3) * 3, seed: hashSeed(cfg.scenerySeed, `${road.id}/tree/${s}/${side}`) });
+      }
+    }
+    if (road.median >= 1.5) {
+      for (let s = inner + 6; s < outer; s += 26) {
+        const p = roadPoint(road, s, 0);
+        trees.push({ x: p.x, z: p.z, size: 4 + noise(s, 0, 7) * 2.5, seed: hashSeed(cfg.scenerySeed, `${road.id}/belt/${s}`) });
+      }
+    }
+  }
+  if (trees.length > 2600) trees.length = 2600;
   return { blocks, parcels, buildings, trees, extent: extent + 35 };
 }
 

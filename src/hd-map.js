@@ -1,9 +1,11 @@
 import { cubicPoints, linePoints, makeRoad, roadPoint, smoothstep, stationPath, maxGrade, bridgeSupports } from './corridor.js';
-import { segmentIntersection } from './sd-map.js';
+import { segmentIntersection, randomFromSeed, hashSeed } from './sd-map.js';
 import { laneMovementSets } from './road-movements.js';
+import { JUNCTION_SPEC as SPEC } from './junction-spec.js';
 
 export function crossSection(edge, laneWidth) {
-  const median = edge.lanesForward && edge.lanesBackward ? (edge.class === 'highway' ? 2 : 0.5) : 0;
+  // GB 50647: 主干路设中央分隔带 1.5-2m,支路/次干路用双黄线(0.5m)。
+  const median = edge.lanesForward && edge.lanesBackward ? (SPEC.median[edge.class] ?? SPEC.median.local) : 0;
   const shoulder = edge.class === 'highway' ? 1.5 : 0.45;
   const left = -edge.lanesBackward * laneWidth - median / 2 - shoulder;
   const right = edge.lanesForward * laneWidth + median / 2 + shoulder;
@@ -17,7 +19,10 @@ export function deriveHDMap(sd, cfg) {
   sd.edges.forEach(e => { incidence.get(e.from).push(e); incidence.get(e.to).push(e); });
   const radii = new Map(sd.nodes.map(n => {
     const list = incidence.get(n.id);
-    let radius = list.length > 1 ? Math.max(...list.map(e => sections.get(e.id).width)) * 0.8 + 4 : 0;
+    // 度 2 节点是街道的延续或弯道,不是交叉口:收紧截断半径,避免在
+    // 每个转弯处挖出一块破碎的路口箱体。
+    const widest = list.length ? Math.max(...list.map(e => sections.get(e.id).width)) : 0;
+    let radius = list.length > 2 ? widest * 0.8 + 4 : list.length === 2 ? Math.min(widest * 0.5 + 2, 8) : 0;
     const lengths = list.map(e => { const other = nodes.get(e.from === n.id ? e.to : e.from); return Math.hypot(n.x - other.x, n.z - other.z); });
     radius = Math.min(radius, Math.min(...lengths) * 0.3);
     return [n.id, radius];
@@ -102,9 +107,22 @@ export function deriveHDMap(sd, cfg) {
         const targetIndex = type === 'right' ? Math.max(0, choices.length - (count - lane.index)) : Math.min(lane.index, choices.length - 1);
         const { target, out } = choices[targetIndex];
         const a = lane.path.at(-1), b = target.path[0];
-        const handle = Math.hypot(b.x - a.x, b.z - a.z) * (type === 'straight' ? 0.33 : 0.55);
+        const dist = Math.hypot(b.x - a.x, b.z - a.z);
+        // Fillet-style handles: bend the connector at the tangent intersection
+        // of the two lanes so the path hugs the actual corner geometry instead
+        // of bulging across the junction.
+        let handle, handleOut;
+        const cross = dir.x * out.z - dir.z * out.x;
+        if (type === 'straight' || Math.abs(cross) < 0.08) {
+          handle = handleOut = dist * (type === 'straight' ? 0.33 : 0.45);
+        } else {
+          const alongIn = ((b.x - a.x) * out.z - (b.z - a.z) * out.x) / cross;
+          const alongOut = ((a.x - b.x) * dir.z - (a.z - b.z) * dir.x) / cross;
+          handle = Math.min(dist * 0.8, Math.max(1.5, Math.abs(alongIn) * 0.55));
+          handleOut = Math.min(dist * 0.8, Math.max(1.5, Math.abs(alongOut) * 0.55));
+        }
         const path = cubicPoints(a, { x: a.x + dir.x * handle, z: a.z + dir.z * handle },
-          { x: b.x - out.x * handle, z: b.z - out.z * handle }, b, 20)
+          { x: b.x - out.x * handleOut, z: b.z - out.z * handleOut }, b, 20)
           .map((p, i) => ({ ...p, y: a.y + (b.y - a.y) * smoothstep(i / 20) }));
         const id = `${lane.id}>${target.id}`;
         const ramp = (roadById.get(lane.edgeId).kind === 'highway') !== (roadById.get(target.edgeId).kind === 'highway');
@@ -119,20 +137,40 @@ export function deriveHDMap(sd, cfg) {
       const p = roadPoint(road, station), raw = atStart ? road.path[1] : road.path.at(-2), anchor = atStart ? road.path[0] : road.path.at(-1);
       const norm = Math.hypot(raw.x - anchor.x, raw.z - anchor.z) || 1;
       const dir = { x: (raw.x - anchor.x) / norm, z: (raw.z - anchor.z) / norm };
-      const left = roadPoint(road, station, (atStart ? -1 : 1) * road.width / 2);
-      const right = roadPoint(road, station, (atStart ? 1 : -1) * road.width / 2);
-      return { left, right, dir, angle: Math.atan2(p.z - node.z, p.x - node.x) };
+      const side = (atStart ? -1 : 1);
+      const left = roadPoint(road, station, side * road.width / 2);
+      const right = roadPoint(road, station, -side * road.width / 2);
+      // Sidewalk collar: same corners pushed out by the sidewalk width so
+      // both roadside footways join into one continuous ring at the junction.
+      const outer = road.width / 2 + cfg.sidewalkWidth;
+      const outerLeft = roadPoint(road, station, side * outer);
+      const outerRight = roadPoint(road, station, -side * outer);
+      return { left, right, outerLeft, outerRight, dir, angle: Math.atan2(p.z - node.z, p.x - node.x) };
     }).sort((a, b) => a.angle - b.angle);
-    const ring = [];
+    const ring = [], walkRing = [];
     ports.forEach((port, i) => {
       ring.push(port.left, port.right);
+      walkRing.push(port.outerLeft, port.outerRight);
       const next = ports[(i + 1) % ports.length];
       const h = Math.hypot(port.right.x - next.left.x, port.right.z - next.left.z) * 0.45;
-      ring.push(...cubicPoints(port.right, { x: port.right.x - port.dir.x * h, z: port.right.z - port.dir.z * h },
+      const corner = cubicPoints(port.right, { x: port.right.x - port.dir.x * h, z: port.right.z - port.dir.z * h },
         { x: next.left.x - next.dir.x * h, z: next.left.z - next.dir.z * h }, next.left, 8).slice(1, -1)
-        .map(p => ({ ...p, y: 0.32 + node.y })));
+        .map(p => ({ ...p, y: 0.32 + node.y }));
+      ring.push(...corner);
+      // 人行道外沿 = 转角曲线各点沿路口中心径向外推。不能对外圈重新拟合
+      // 三次曲线:控制点垂度按外圈跨度比例放大后会翻进路口箱体内部,让
+      // 环带三角化覆盖整个路口(铺装一直铺到路口中间的病根)。
+      walkRing.push(...corner.map(p => {
+        const dx = p.x - node.x, dz = p.z - node.z, d = Math.hypot(dx, dz) || 1;
+        const k = (d + cfg.sidewalkWidth + 0.3) / d;
+        return { x: node.x + dx * k, z: node.z + dz * k, y: 0.32 + node.y };
+      }));
     });
-    junctions.push({ id: node.id, ring, radius: radii.get(node.id), y: node.y + 0.32 });
+    // A seeded share of multi-approach junctions becomes a roundabout.
+    const roundabout = incident.length >= 4 && radii.get(node.id) > 14
+      && randomFromSeed(hashSeed(cfg.scenerySeed, `${node.id}:roundabout`))() < 0.2;
+    junctions.push({ id: node.id, ring, walkRing, radius: radii.get(node.id), y: node.y + 0.32,
+      cx: node.x, cz: node.z, roundabout });
     if (incident.length > 2) facilities.push({ id: `junction-${node.id}`, type: 'junction', nodeId: node.id, approaches: incident.length });
   }
   return { roads, lanes, connectors, junctions, facilities, warnings: [...new Set(warnings)],
