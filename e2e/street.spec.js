@@ -52,6 +52,7 @@ test('street-level captures of the generated city', async ({ page }) => {
     const candidates = edges.filter(e => e.class !== 'highway').slice(0, 12);
     let shop = null, shopAt = null, shopEdge = null, shopDist = Infinity;
     for (const b of city.buildings) {
+      if (b.style !== 'mixed-use') continue;   // 沿街商铺楼,店招一定存在
       for (const e of candidates) {
         const s = segDistance(b.x, b.z, e.a, e.b);
         if (s.d < shopDist) { shopDist = s.d; shop = b; shopAt = { x: s.x, z: s.z }; shopEdge = e; }
@@ -74,9 +75,11 @@ test('street-level captures of the generated city', async ({ page }) => {
         const edgeDir = { x: (shopEdge.b.x - shopEdge.a.x) / shopEdge.len, z: (shopEdge.b.z - shopEdge.a.z) / shopEdge.len };
         const tx = -edgeDir.z, tz = edgeDir.x;    // along the street
         const ux = shopAt.x - shop.x, uz = shopAt.z - shop.z, ul = Math.hypot(ux, uz) || 1;
+        // 站在这栋楼对面、沿街错开半个面宽,目标对准近侧墙的店招高度。
         return [{
-          from: { x: shopAt.x + tx * shopSpan * 1.1, y: 1.7, z: shopAt.z + tz * shopSpan * 1.1 },
-          to: { x: shop.x + (ux / ul) * shopSpan * 0.3, y: 3.2, z: shop.z + (uz / ul) * shopSpan * 0.3 },
+          from: { x: shopAt.x - (ux / ul) * 9 + tx * shopSpan * 0.8, y: 1.7,
+            z: shopAt.z - (uz / ul) * 9 + tz * shopSpan * 0.8 },
+          to: { x: shop.x + (ux / ul) * shopSpan * 0.7, y: 3.4, z: shop.z + (uz / ul) * shopSpan * 0.7 },
         }];
       })(),
       aerial: [

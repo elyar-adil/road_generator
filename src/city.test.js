@@ -98,7 +98,12 @@ describe('HD and city derivation', () => {
   });
 
   it('rebuilds the dependent lane geometry after a node edit', () => {
-    const sd = structuredClone(city.sd), affected = sd.nodes[6];
+    const sd = structuredClone(city.sd);
+    // Move a real junction, not a dead end — a dangling node changes no face.
+    const degree = new Map();
+    for (const e of sd.edges) { degree.set(e.from, (degree.get(e.from) || 0) + 1); degree.set(e.to, (degree.get(e.to) || 0) + 1); }
+    const affected = sd.nodes.find(n => (degree.get(n.id) ?? 0) >= 3);
+    expect(affected).toBeDefined();
     affected.x += 8;
     const next = buildCity({ ...config(), sdMap: sd });
     const id = city.lanes.find(l => l.from === affected.id).id;

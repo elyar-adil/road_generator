@@ -43,6 +43,11 @@ export function deriveHDMap(sd, cfg) {
       if (crossings.length) {
         riseEnd = Math.min(...crossings.map(c => c.station - c.width / 2 - 10));
         fallStart = Math.max(...crossings.map(c => c.station + c.width / 2 + 10));
+      } else {
+        // 纯跨河/跨线桥没有可依附的桥下道路,把坡顶放在桥中:0.4L 的平顶
+        // 会让引道只剩几成跨度,smoothstep 的 1.875 倍峰值斜率直接爆表。
+        riseEnd = length * 0.5 - 5;
+        fallStart = length * 0.5 + 5;
       }
     }
     const baseAt = t => 0.32 + a.y + (b.y - a.y) * t;

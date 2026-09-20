@@ -12,7 +12,7 @@ const length = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
 function sanitizeGeography(g) {
   if (!g?.river || !Array.isArray(g.river.points)) return undefined;
   const point = p => ({ x: clamp(p.x, -20000, 20000, 0), z: clamp(p.z, -20000, 20000, 0) });
-  return { generator: 'organic-growth-v2',
+  return { generator: identifier(g.generator) || 'grid-city-v3',
     river: { points: g.river.points.slice(0, 300).map(point), width: clamp(g.river.width, 10, 300, 60) },
     centres: (g.centres || []).slice(0, 20).map(c => ({ ...point(c), radius: clamp(c.radius, 10, 5000, 300),
       weight: clamp(c.weight, 0, 4, 1), angle: clamp(c.angle, -10, 10, 0), style: ['historic', 'urban', 'suburban'].includes(c.style) ? c.style : 'urban' })),
@@ -125,12 +125,14 @@ export function validateSDMap(map) {
     const pair = [e.from, e.to].sort().join('>') + `/${e.layer}`;
     if (pairs.has(pair)) errors.push(`道路 ${e.id} 与同层道路重复`);
     pairs.add(pair);
-    adjacency.get(e.from).push(e.to); adjacency.get(e.to).push(e.from);
+    adjacency.get(e.from).push({ id: e.to, layer: e.layer }); adjacency.get(e.to).push({ id: e.from, layer: e.layer });
   }
   for (const [id, neighbors] of adjacency) {
     const origin = nodes.get(id);
     for (let i = 0; i < neighbors.length; i++) for (let j = i + 1; j < neighbors.length; j++) {
-      const a = nodes.get(neighbors[i]), b = nodes.get(neighbors[j]);
+      // 不同层(桥面与引道)在平面上共线是正常的,只检查同层夹角。
+      if (neighbors[i].layer !== neighbors[j].layer) continue;
+      const a = nodes.get(neighbors[i].id), b = nodes.get(neighbors[j].id);
       const cross = (a.x - origin.x) * (b.z - origin.z) - (a.z - origin.z) * (b.x - origin.x);
       const dot = (a.x - origin.x) * (b.x - origin.x) + (a.z - origin.z) * (b.z - origin.z);
       const angle = Math.abs(Math.atan2(cross, dot));
@@ -144,7 +146,7 @@ export function validateSDMap(map) {
     if (visited.has(id)) continue;
     components++; const queue = [id]; visited.add(id);
     for (let i = 0; i < queue.length; i++) for (const next of adjacency.get(queue[i]) || []) {
-      if (!visited.has(next)) { visited.add(next); queue.push(next); }
+      if (!visited.has(next.id)) { visited.add(next.id); queue.push(next.id); }
     }
   }
   if (components > 1) warnings.push(`路网有 ${components} 个独立连通分量`);

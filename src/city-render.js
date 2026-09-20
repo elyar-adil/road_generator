@@ -397,6 +397,47 @@ function groundFloorMaterial(kind) {
   return mat;
 }
 
+// 店招:中国街景最有辨识度的一层。每 4m 一块招牌,底色/文字轮换,横向
+// 沿街重复;无 DOM 的测试环境退化为纯色板。
+const SIGN_TEXTS = ['便利店', '家常菜', '药房', '理发店', '五金建材', '水果超市', '快递驿站', '兰州拉面', '烟酒商行', '房产中介', '早餐铺', '打印照相'];
+const SIGN_STYLES = [['#bf3a2b', '#fff7e6'], ['#1a5fb4', '#ffffff'], ['#e8b60f', '#3a2a08'],
+  ['#167f45', '#ffffff'], ['#7a1f1f', '#ffe9c9'], ['#f2f2ec', '#b03030']];
+let signMaterialsCache;
+function signMaterials() {
+  if (signMaterialsCache !== undefined) return signMaterialsCache;
+  if (typeof document === 'undefined') { signMaterialsCache = null; return null; }
+  signMaterialsCache = SIGN_TEXTS.map((text, i) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512; canvas.height = 96;
+    const ctx = canvas.getContext('2d');
+    const [bg, fg] = SIGN_STYLES[i % SIGN_STYLES.length];
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, 512, 96);
+    ctx.strokeStyle = 'rgba(0,0,0,0.22)'; ctx.lineWidth = 6; ctx.strokeRect(4, 4, 504, 88);
+    ctx.fillStyle = fg;
+    ctx.font = 'bold 58px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, 256, 52);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.wrapS = THREE.RepeatWrapping; texture.anisotropy = 8;
+    return new THREE.MeshStandardMaterial({ map: texture, roughness: 0.55, side: THREE.FrontSide, envMapIntensity: 0.4 });
+  });
+  return signMaterialsCache;
+}
+// 单块招牌:v 取竖向 0..1,u 取整张 0..1 —— 每块正好一个完整店名。
+// 必须离开墙面 0.15m,否则和上层墙体共面,深度测试五五开。uv 方向固定为
+// "外法线左转 90°"(见 building 里的排序),不依赖环的绕向,店名不会镜像。
+function addSignBoard(batch, a, b, y0, y1, material) {
+  // 双面两块:正面朝外、背面朝内,各自配正确的 u 方向。招牌本来就两面都
+  // 有字,这样无论环的绕向如何,街上看到的店名都不会镜像。
+  const front = quad({ ...a, y: y0 }, { ...b, y: y0 }, { ...b, y: y1 }, { ...a, y: y1 });
+  front.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
+  batch.add(front, material, 'sign');
+  const back = quad({ ...a, y: y1 }, { ...b, y: y1 }, { ...b, y: y0 }, { ...a, y: y0 });
+  back.setAttribute('uv', new THREE.Float32BufferAttribute([1, 1, 0, 1, 0, 0, 1, 0], 2));
+  batch.add(back, material, 'sign');
+}
+
 // 首层墙面:UV 不做纵向平铺,水平按 4.2m 重复,让门窗/柱网保持真实尺度。
 function addBaseWall(batch, a, b, y0, material, tint, mirror = 1) {
   const len = Math.hypot(b.x - a.x, b.z - a.z);
@@ -557,6 +598,31 @@ function building(batch, b) {
   for (let i = 0; i < b.ring.length; i++)
     addBaseWall(batch, b.ring[i], b.ring[(i + 1) % b.ring.length], bottom,
       groundFloorMaterial(baseKind), wallTint, mirror);
+  const signs = baseKind === 'lobby' ? null : signMaterials();
+  if (signs) {
+    // 首层顶部一条连续店招带:每 4m 一块、3.2m 招牌 + 0.8m 间隔,逐块换店名,
+    // 少量留空(卷帘门/入口)。整条街因此像不同店铺,而不是一家连锁店。
+    for (let i = 0; i < b.ring.length; i++) {
+      const a = b.ring[i], c = b.ring[(i + 1) % b.ring.length];
+      const len = Math.hypot(c.x - a.x, c.z - a.z);
+      if (len < 2.5) continue;
+      const ux = (a.x + c.x) / 2 - b.x, uz = (a.z + c.z) / 2 - b.z, ul = Math.hypot(ux, uz) || 1;
+      const ox = ux / ul, oz = uz / ul;                                  // 外法线
+      // uv 的 u 轴固定取外法线左转 90°:站在街上看,文字永远从左到右。
+      const forward = oz * (c.x - a.x) - ox * (c.z - a.z) >= 0;
+      const a2 = forward ? a : c, c2 = forward ? c : a;
+      const off = { x: ox * 0.15, z: oz * 0.15 };
+      const dx = (c2.x - a2.x) / len, dz = (c2.z - a2.z) / len;
+      const pitch = 4, plate = Math.min(3.2, len - 0.8);
+      for (let s = 0.4; s + plate <= len - 0.4 + 1e-6; s += pitch) {
+        if (rand() < 0.18) continue;
+        addSignBoard(batch,
+          { x: a2.x + dx * s + off.x, z: a2.z + dz * s + off.z },
+          { x: a2.x + dx * (s + plate) + off.x, z: a2.z + dz * (s + plate) + off.z },
+          bottom + 3.3, bottom + 4.2, signs[Math.floor(rand() * signs.length)]);
+      }
+    }
+  }
   const ground = 1, lower = bottom + 3.2;
   for (let i = 0; i < b.ring.length; i++)
     addWall(batch, b.ring[i], b.ring[(i + 1) % b.ring.length], lower, towerRing ? podiumTop : top,
